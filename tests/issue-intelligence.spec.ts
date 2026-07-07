@@ -31,6 +31,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     executionLockedAt: null,
     createdByAgentId: null,
     createdByUserId: null,
+    responsibleUserId: null,
     issueNumber: 9,
     identifier: "CAM-9",
     requestDepth: 0,

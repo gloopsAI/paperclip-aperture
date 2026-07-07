@@ -45,6 +45,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     executionLockedAt: null,
     createdByAgentId: null,
     createdByUserId: null,
+    responsibleUserId: null,
     issueNumber: 9,
     identifier: "CAM-9",
     requestDepth: 0,
@@ -215,6 +216,28 @@ function createRecoveryAction(
     resolvedAt: null,
     createdAt: "2026-03-19T10:10:00.000Z",
     updatedAt: "2026-03-19T10:11:00.000Z",
+    ...overrides,
+  };
+}
+
+function createIssueWatchdog(
+  overrides: Partial<NonNullable<Issue["watchdog"]>> = {},
+): NonNullable<Issue["watchdog"]> {
+  return {
+    id: "watchdog-1",
+    companyId: "company-live",
+    issueId: "issue-1",
+    watchdogAgentId: "agent-watchdog",
+    instructions: "Review whether the blocked rollout has fresh risk before continuing.",
+    status: "active",
+    watchdogIssueId: null,
+    lastObservedFingerprint: "observed:issue-1",
+    lastReviewedFingerprint: "reviewed:issue-1:previous",
+    lastTriggeredAt: new Date("2026-03-19T10:18:00.000Z"),
+    lastCompletedAt: null,
+    triggerCount: 1,
+    createdAt: new Date("2026-03-19T10:00:00.000Z"),
+    updatedAt: new Date("2026-03-19T10:18:30.000Z"),
     ...overrides,
   };
 }
@@ -1145,6 +1168,79 @@ describe("paperclip aperture", () => {
         status: "active",
       }),
     }));
+  });
+
+  it("uses pending Paperclip watchdog triggers as first-class focus evidence", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    harness.seed({
+      issues: [
+        createIssue({
+          watchdog: createIssueWatchdog(),
+        }),
+      ],
+    });
+
+    const snapshot = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+
+    expect(snapshot.now?.taskId).toBe("issue:issue-1");
+    expect(snapshot.now?.summary).toBe(
+      "Paperclip watchdog triggered follow-up: Review whether the blocked rollout has fresh risk before continuing.",
+    );
+    expect(snapshot.now?.context?.items?.find((item) => item.id === "watchdog")?.value).toBe("Triggered");
+    expect(snapshot.now?.context?.items?.find((item) => item.id === "recommended-move")?.value).toBe(
+      "Review the watchdog-triggered follow-up before resuming work.",
+    );
+    expect(snapshot.now?.provenance?.factors).toEqual(expect.arrayContaining([
+      "watchdog",
+      "triggered review",
+      "active",
+    ]));
+    expect(snapshot.now?.metadata).toEqual(expect.objectContaining({
+      watchdog: expect.objectContaining({
+        id: "watchdog-1",
+        status: "active",
+        pendingTrigger: true,
+        lastTriggeredAt: "2026-03-19T10:18:00.000Z",
+      }),
+    }));
+  });
+
+  it("does not promote every active Paperclip watchdog into Now", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-19T10:21:00.000Z"));
+    const harness = createTestHarness({ manifest });
+    try {
+      await plugin.definition.setup(harness.ctx);
+      harness.seed({
+        issues: [
+          createIssue({
+            priority: "critical",
+            workMode: "planning",
+            watchdog: createIssueWatchdog({
+              lastTriggeredAt: new Date("2026-03-19T10:18:00.000Z"),
+              lastCompletedAt: new Date("2026-03-19T10:20:00.000Z"),
+              updatedAt: new Date("2026-03-19T10:20:00.000Z"),
+            }),
+          }),
+        ],
+      });
+
+      const snapshot = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+
+      expect(snapshot.now).toBeNull();
+      expect(snapshot.next).toHaveLength(0);
+      expect(snapshot.ambient[0]?.taskId).toBe("issue:issue-1");
+      expect(snapshot.ambient[0]?.context?.items?.find((item) => item.id === "watchdog")?.value).toBe("Active");
+      expect(snapshot.ambient[0]?.metadata).toEqual(expect.objectContaining({
+        watchdog: expect.objectContaining({
+          pendingTrigger: false,
+          lastCompletedAt: "2026-03-19T10:20:00.000Z",
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reconciles blocked issues when host comment timestamps are ISO strings", async () => {

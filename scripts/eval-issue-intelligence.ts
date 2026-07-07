@@ -53,6 +53,7 @@ function createIssue(input: CorpusFixture["issue"]): Issue {
     executionLockedAt: null,
     createdByAgentId: null,
     createdByUserId: null,
+    responsibleUserId: null,
     issueNumber: 1,
     identifier: input.identifier,
     requestDepth: 0,

@@ -20,6 +20,7 @@ export const ATTENTION_CONTEXT_IDS = {
   blockedReason: "blocked-reason",
   blockedSeverity: "blocked-severity",
   recoveryAction: "recovery-action",
+  watchdog: "watchdog",
   documentLock: "document-lock",
   latestComment: "latest-comment",
   agentStatus: "agent-status",
@@ -97,6 +98,10 @@ export function blockedSeverityItem(value: string): AttentionContextItem {
 
 export function recoveryActionItem(value: string): AttentionContextItem {
   return item(ATTENTION_CONTEXT_IDS.recoveryAction, "Recovery", value);
+}
+
+export function watchdogItem(value: string): AttentionContextItem {
+  return item(ATTENTION_CONTEXT_IDS.watchdog, "Watchdog", value);
 }
 
 export function documentLockItem(value: string): AttentionContextItem {

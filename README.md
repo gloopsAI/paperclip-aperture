@@ -79,6 +79,7 @@ and agents                             attention now?    actually sees     to th
 - a plugin-local semantic mapping and policy layer that interprets Paperclip issue, approval, and agent signals before composing the final Focus view
 - richer semantic continuity hints on mapped issue events, including `supersedes` and `resolves` relationships where Paperclip-specific intent is clear
 - document-aware review interpretation for memo/spec-backed issues so Focus can tell the difference between `review is blocked on the artifact` and `the artifact is attached, monitor instead`
+- Paperclip watchdog awareness that preserves watchdog metadata and promotes only pending watchdog triggers into higher-salience Focus evidence
 - dynamic re-stacking so items can move between `now`, `next`, and `ambient` as new evidence arrives
 - inline issue commenting from the Focus surface when a Paperclip issue supports written response
 - durable acknowledge/suppression behavior backed by plugin state and ledger replay
@@ -128,13 +129,13 @@ For `0.4.x`, the boundary works like this:
 - approval transport now goes through a worker-side Paperclip adapter using the plugin SDK HTTP client, so the browser UI no longer talks to host approval APIs directly
 - the plugin preserves Paperclip source facts as `SourceEvent`s where the Core contract supports them, while still exporting the normalized `ApertureEvent` used for replay/debug
 - that semantic layer includes reusable intent detectors, actor resolution against real company agents, downstream blocker extraction, explicit rule ids for matched issue heuristics, and shared operator-language generation inside the plugin
-- typed Paperclip issue blocker relations are preserved as Focus context/provenance/metadata so Aperture has better dependency facts without the plugin inventing dependency routing
+- typed Paperclip issue blocker relations and watchdog summaries are preserved as Focus context/provenance/metadata so Aperture has better dependency facts without the plugin inventing dependency routing
 - `activity.logged` document events invalidate stale reconciled state so document-backed review blockers refresh promptly without a full browser-side merge layer
 - Paperclip `agent.error_cleared` events invalidate reconciled agent state, and redacted deleted comments are ignored when Focus chooses the latest operator signal
 - subscribed event callbacks stay memory-only and flush pending Aperture state from the next scoped data/action bridge call, keeping host invocation scope boundaries intact without losing replay durability after Focus refreshes
 - Focus exports the live Core snapshot, the reconciled/plugin-composed display snapshot, and bounded Core traces so replay/debug flows can inspect both the engine substrate and the final operator view
 
-The plugin requires Paperclip `2026.525.0` or newer and has been validated against [`@tomismeta/aperture-core@0.7.0`](https://www.npmjs.com/package/@tomismeta/aperture-core) and [`@paperclipai/plugin-sdk@2026.609.0`](https://www.npmjs.com/package/@paperclipai/plugin-sdk).
+The plugin requires Paperclip `2026.525.0` or newer and has been validated against [`@tomismeta/aperture-core@0.7.0`](https://www.npmjs.com/package/@tomismeta/aperture-core) and [`@paperclipai/plugin-sdk@2026.707.0`](https://www.npmjs.com/package/@paperclipai/plugin-sdk).
 
 Approval overlay transport is opt-in until the Paperclip plugin SDK exposes a first-class approval client. Set the plugin config field `paperclipApiBase` when the worker can reach the host approval API; leave it empty to run Focus without approval overlays in hosted or restricted-network environments.
 

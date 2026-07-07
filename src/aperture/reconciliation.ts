@@ -18,6 +18,7 @@ import {
   pauseReasonItem,
   recommendedMoveItem,
   recoveryActionItem,
+  watchdogItem,
   humanizeToken,
 } from "./attention-context.js";
 import { mergeStoredFrames, type FrameLane, type StoredFrameCandidate } from "./frame-model.js";
@@ -47,6 +48,7 @@ type IssueRelationSummary = Awaited<ReturnType<PluginIssuesClient["relations"]["
 type IssueRelationIssueSummary = IssueRelationSummary["blockedBy"][number];
 type BlockedInboxAttention = NonNullable<Issue["blockedInboxAttention"]>;
 type ActiveRecoveryAction = NonNullable<Issue["activeRecoveryAction"]>;
+type IssueWatchdogSummary = NonNullable<Issue["watchdog"]>;
 
 const COMMENT_LOOKUP_CONCURRENCY = 6;
 const ISSUE_LIST_TTL_MS = 15_000;
@@ -92,6 +94,14 @@ function isOpenRecoveryAction(action: ActiveRecoveryAction | null | undefined): 
   return action?.status === "active" || action?.status === "escalated";
 }
 
+function hasPendingWatchdogTrigger(watchdog: IssueWatchdogSummary | null | undefined): watchdog is IssueWatchdogSummary {
+  if (watchdog?.status !== "active" || !watchdog.lastTriggeredAt) return false;
+  const triggeredAt = toTimestamp(watchdog.lastTriggeredAt);
+  if (triggeredAt === 0) return false;
+  const completedAt = toTimestamp(watchdog.lastCompletedAt);
+  return completedAt === 0 || triggeredAt > completedAt;
+}
+
 function issueReferenceLabel(issue: Pick<IssueRelationIssueSummary, "identifier" | "title"> | null | undefined): string | null {
   if (!issue) return null;
   return issue.identifier ? `${issue.identifier} ${issue.title}` : issue.title;
@@ -121,6 +131,11 @@ function recoveryRecommendedMove(action: ActiveRecoveryAction | null | undefined
   return action.nextAction || `Resolve the ${humanizeLower(action.kind)} recovery action.`;
 }
 
+function watchdogRecommendedMove(watchdog: IssueWatchdogSummary | null | undefined): string | null {
+  if (!hasPendingWatchdogTrigger(watchdog)) return null;
+  return "Review the watchdog-triggered follow-up before resuming work.";
+}
+
 function blockedInboxSummary(attention: BlockedInboxAttention): string {
   if (attention.action.detail) return truncate(attention.action.detail);
   if (attention.action.label) return truncate(attention.action.label);
@@ -134,6 +149,12 @@ function blockedInboxSummary(attention: BlockedInboxAttention): string {
 function recoverySummary(action: ActiveRecoveryAction): string {
   const nextAction = action.nextAction ? `: ${truncate(action.nextAction, 140)}` : ".";
   return `Paperclip opened a ${humanizeLower(action.kind)} recovery action${nextAction}`;
+}
+
+function watchdogSummary(watchdog: IssueWatchdogSummary): string {
+  const instructions = watchdog.instructions?.trim();
+  if (instructions) return `Paperclip watchdog triggered follow-up: ${truncate(instructions, 140)}`;
+  return "Paperclip watchdog triggered follow-up for this issue.";
 }
 
 function blockedInboxProvenance(attention: BlockedInboxAttention): { whyNow: string; factors: string[] } {
@@ -159,6 +180,15 @@ function recoveryProvenance(action: ActiveRecoveryAction): { whyNow: string; fac
   };
 }
 
+function watchdogProvenance(watchdog: IssueWatchdogSummary): { whyNow: string; factors: string[] } {
+  return {
+    whyNow: watchdog.lastTriggeredAt
+      ? `Paperclip watchdog triggered on ${toIsoString(watchdog.lastTriggeredAt) ?? "the latest issue state"} and has not completed review.`
+      : "Paperclip watchdog has active review state for this issue.",
+    factors: ["watchdog", "triggered review", humanizeLower(watchdog.status)],
+  };
+}
+
 function blockedInboxConsequence(attention: BlockedInboxAttention): "low" | "medium" | "high" {
   if (attention.severity === "critical" || attention.severity === "high") return "high";
   if (attention.severity === "medium") return "medium";
@@ -169,6 +199,7 @@ function issueConsequence(issue: Issue, lane: FrameLane): "low" | "medium" | "hi
   if (issue.blockedInboxAttention) return blockedInboxConsequence(issue.blockedInboxAttention);
   if (issue.activeRecoveryAction?.status === "escalated") return "high";
   if (issue.activeRecoveryAction?.status === "active" && issue.priority === "critical") return "high";
+  if (hasPendingWatchdogTrigger(issue.watchdog)) return priorityConsequence(issue);
   if (issue.status === "blocked") return priorityConsequence(issue);
   return lane === "ambient" ? "low" : "medium";
 }
@@ -176,6 +207,7 @@ function issueConsequence(issue: Issue, lane: FrameLane): "low" | "medium" | "hi
 function issueTone(issue: Issue, lane: FrameLane): StoredAttentionFrame["tone"] {
   if (issue.blockedInboxAttention?.severity === "critical") return "critical";
   if (issue.activeRecoveryAction?.status === "escalated") return "critical";
+  if (hasPendingWatchdogTrigger(issue.watchdog)) return issue.priority === "critical" ? "critical" : "focused";
   if (issue.status === "blocked") return "focused";
   return lane === "ambient" ? "ambient" : "focused";
 }
@@ -241,6 +273,31 @@ function recoveryMetadata(action: ActiveRecoveryAction): Record<string, unknown>
     resolvedAt: toIsoStringOrNull(action.resolvedAt),
     updatedAt: toIsoStringOrNull(action.updatedAt),
   };
+}
+
+function watchdogMetadata(watchdog: IssueWatchdogSummary): Record<string, unknown> {
+  return {
+    id: watchdog.id,
+    companyId: watchdog.companyId,
+    issueId: watchdog.issueId,
+    watchdogAgentId: watchdog.watchdogAgentId,
+    instructions: watchdog.instructions,
+    status: watchdog.status,
+    watchdogIssueId: watchdog.watchdogIssueId,
+    lastObservedFingerprint: watchdog.lastObservedFingerprint,
+    lastReviewedFingerprint: watchdog.lastReviewedFingerprint,
+    lastTriggeredAt: toIsoStringOrNull(watchdog.lastTriggeredAt),
+    lastCompletedAt: toIsoStringOrNull(watchdog.lastCompletedAt),
+    triggerCount: watchdog.triggerCount,
+    createdAt: toIsoStringOrNull(watchdog.createdAt),
+    updatedAt: toIsoStringOrNull(watchdog.updatedAt),
+    pendingTrigger: hasPendingWatchdogTrigger(watchdog),
+  };
+}
+
+function watchdogContextLabel(watchdog: IssueWatchdogSummary): string | null {
+  if (watchdog.status !== "active") return null;
+  return hasPendingWatchdogTrigger(watchdog) ? "Triggered" : "Active";
 }
 
 function documentSignalMetadata(signal: IssueDocumentSignal): Record<string, unknown> | null {
@@ -313,6 +370,10 @@ function issueLane(issue: Issue, comment: LatestComment, evidence: IssueFrameEvi
     return issue.priority === "critical" || issue.priority === "high" ? "now" : "next";
   }
 
+  if (hasPendingWatchdogTrigger(issue.watchdog)) {
+    return issue.priority === "critical" || issue.priority === "high" ? "now" : "next";
+  }
+
   if (
     (issue.status === "blocked" || issue.status === "in_review")
     && (hasIntent(evidence.analysis, "resolution") || evidence.documentSignal.resolvesArtifactRequest)
@@ -375,6 +436,7 @@ function issueSummary(issue: Issue, evidence: IssueFrameEvidence): string {
   if (isOpenRecoveryAction(issue.activeRecoveryAction)) {
     return recoverySummary(issue.activeRecoveryAction);
   }
+  if (hasPendingWatchdogTrigger(issue.watchdog)) return watchdogSummary(issue.watchdog);
 
   const blocker = primaryUnresolvedBlocker(evidence.relations);
   if (blocker) return `${relationIssueLabel(blocker)} is a tracked blocker for this issue.`;
@@ -387,6 +449,7 @@ function issueProvenance(issue: Issue, evidence: IssueFrameEvidence) {
   if (isOpenRecoveryAction(issue.activeRecoveryAction)) {
     return recoveryProvenance(issue.activeRecoveryAction);
   }
+  if (hasPendingWatchdogTrigger(issue.watchdog)) return watchdogProvenance(issue.watchdog);
 
   const base = issueWhyNow(issue, evidence.analysis, evidence.documentSignal);
   const blocker = primaryUnresolvedBlocker(evidence.relations);
@@ -411,6 +474,8 @@ function issueAttentionTimestamp(
     documentSignal.latestDocumentLockedAt,
     issue.blockedInboxAttention?.stoppedSinceAt,
     toIsoString(issue.activeRecoveryAction?.updatedAt),
+    toIsoString(issue.watchdog?.lastTriggeredAt),
+    toIsoString(issue.watchdog?.updatedAt),
   ]
     .filter((value): value is string => !!value)
     .sort();
@@ -445,6 +510,7 @@ function issueFrame(
   const move = issue.blockedInboxAttention
     ? blockedInboxRecommendedMove(issue.blockedInboxAttention)
     : recoveryRecommendedMove(issue.activeRecoveryAction)
+      ?? watchdogRecommendedMove(issue.watchdog)
       ?? issueRecommendedMove(issue, analysis, documentSignal);
   const target = analysis.blockingTarget;
   const semantic = semanticMetadata(analysis.semanticConfidence, analysis.relationHints);
@@ -455,6 +521,7 @@ function issueFrame(
   const relationsMetadata = relationMetadata(relations);
   const documentLock = issueDocumentLockLabel(documentSignal);
   const documentMetadata = documentSignalMetadata(documentSignal);
+  const watchdogLabel = issue.watchdog ? watchdogContextLabel(issue.watchdog) : null;
 
   return {
     lane,
@@ -484,6 +551,7 @@ function issueFrame(
             blockedSeverityItem(humanizeToken(issue.blockedInboxAttention.severity)),
           ] : []),
           ...(isOpenRecoveryAction(issue.activeRecoveryAction) ? [recoveryActionItem(humanizeToken(issue.activeRecoveryAction.kind))] : []),
+          ...(watchdogLabel ? [watchdogItem(watchdogLabel)] : []),
           ...(documentLock ? [documentLockItem(documentLock)] : []),
           issueStatusItem(issue.status.replace(/_/g, " ")),
           issuePriorityItem(issue.priority),
@@ -515,6 +583,7 @@ function issueFrame(
         },
         ...(issue.blockedInboxAttention ? { blockedInboxAttention: blockedInboxMetadata(issue.blockedInboxAttention) } : {}),
         ...(issue.activeRecoveryAction ? { activeRecoveryAction: recoveryMetadata(issue.activeRecoveryAction) } : {}),
+        ...(issue.watchdog ? { watchdog: watchdogMetadata(issue.watchdog) } : {}),
         ...(documentMetadata ? { issueDocuments: documentMetadata } : {}),
         ...(relationsMetadata ? { issueRelations: relationsMetadata } : {}),
         ...(semantic ? { semantic } : {}),
