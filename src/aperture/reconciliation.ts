@@ -897,5 +897,39 @@ export async function reconcileAttentionSnapshot(
   config: Record<string, unknown>,
 ): Promise<AttentionSnapshot> {
   const candidates = await loadReconciledCandidates(ctx, store, companyId, config);
-  return mergeStoredFrames(snapshot, companyId, candidates, review);
+  return mergeReconciledFrames(snapshot, companyId, candidates, review);
+}
+
+function isLiveReconciledEntityFrame(frame: StoredAttentionFrame): boolean {
+  const metadata = frame.metadata;
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return false;
+  const record = metadata as Record<string, unknown>;
+  return record.liveReconciled === true && (record.entityType === "issue" || record.entityType === "agent");
+}
+
+/**
+ * Host reconciliation is exhaustive for live issue/agent attention. If a
+ * previously reconciled entity no longer yields a candidate, it has left the
+ * actionable host states and must not survive forever in persisted Focus.
+ * Event-derived Core frames are retained because they have their own terminal
+ * events and do not carry liveReconciled metadata.
+ */
+export function mergeReconciledFrames(
+  snapshot: AttentionSnapshot,
+  companyId: string,
+  candidates: StoredFrameCandidate[],
+  review: AttentionReviewState | null,
+): AttentionSnapshot {
+  const liveTaskIds = new Set(candidates.map((candidate) => candidate.frame.taskId));
+  const retain = (frame: StoredAttentionFrame | null): StoredAttentionFrame | null => (
+    frame && isLiveReconciledEntityFrame(frame) && !liveTaskIds.has(frame.taskId) ? null : frame
+  );
+  const pruned: AttentionSnapshot = {
+    ...snapshot,
+    now: retain(snapshot.now),
+    next: snapshot.next.map((frame) => retain(frame)).filter((frame): frame is StoredAttentionFrame => frame !== null),
+    ambient: snapshot.ambient.map((frame) => retain(frame)).filter((frame): frame is StoredAttentionFrame => frame !== null),
+  };
+
+  return mergeStoredFrames(pruned, companyId, candidates, review);
 }

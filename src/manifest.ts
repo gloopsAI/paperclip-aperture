@@ -3,10 +3,8 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "tomismeta.paperclip-aperture",
   apiVersion: 1,
-  version: "0.4.8",
-  // Paperclip 2026.707.0's npm launcher currently reports 0.0.0 to plugin
-  // compatibility checks. The SDK dependency remains pinned to that exact host
-  // release in package.json, so omit the defensive floor for this deployment.
+  version: "0.4.8-gloops.2",
+  minimumHostVersion: "2026.707.0",
   displayName: "Paperclip Aperture",
   description: "The live attention layer for Paperclip, combining Aperture Core continuity with Paperclip-native operator policy.",
   author: "@tomismeta",

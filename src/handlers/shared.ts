@@ -2,6 +2,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { ApertureCompanyStore } from "../aperture/core-store.js";
 import {
   createPersistedAttentionState,
+  isAttentionReviewState,
   normalizePersistedAttentionState,
   type PersistedAttentionState,
 } from "../aperture/persisted-state.js";
@@ -18,6 +19,17 @@ export const ATTENTION_SNAPSHOT_STATE_KEY = "attention-snapshot";
 export const ATTENTION_LEDGER_STATE_KEY = "attention-ledger";
 export const ATTENTION_REVIEW_STATE_KEY = "attention-review";
 export const ATTENTION_UPDATES_STREAM = "attention-updates";
+
+export type PluginRequestContext = {
+  actor: Readonly<{
+    type: "user" | "agent" | "system";
+    userId: string | null;
+    agentId: string | null;
+    runId: string | null;
+    companyId: string | null;
+  }>;
+  companyId: string | null;
+};
 
 const companyMutationQueue = new Map<string, Promise<void>>();
 const BEST_EFFORT_RETRY_DELAYS_MS = [10, 30] as const;
@@ -40,6 +52,59 @@ export function requireStringParam(params: Record<string, unknown>, key: string)
 
 export function requireCompanyId(params: Record<string, unknown>): string {
   return requireStringParam(params, "companyId");
+}
+
+export function requireAuthenticatedUser(
+  context: PluginRequestContext | undefined,
+  companyId: string,
+): string {
+  if (
+    context?.actor.type !== "user"
+    || !context.actor.userId
+    || context.companyId !== companyId
+    || context.actor.companyId !== companyId
+  ) {
+    throw new Error("Focus personal actions require an authenticated user in the active company scope.");
+  }
+  return context.actor.userId;
+}
+
+function userReviewStateKey(userId: string): string {
+  return `attention-review:user:${userId}`;
+}
+
+export async function loadUserReviewState(
+  ctx: PluginContext,
+  companyId: string,
+  userId: string,
+): Promise<AttentionReviewState> {
+  try {
+    const value = await ctx.state.get({
+      scopeKind: "company",
+      scopeId: companyId,
+      stateKey: userReviewStateKey(userId),
+    });
+    return isAttentionReviewState(value, companyId) ? value : createEmptyReviewState(companyId);
+  } catch (error) {
+    if (!isInvocationScopeDenied(error)) throw error;
+    ctx.logger.warn("Aperture personal review state unavailable in this host callback; using empty viewer state.", {
+      companyId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return createEmptyReviewState(companyId);
+  }
+}
+
+export async function persistUserReviewState(
+  ctx: PluginContext,
+  companyId: string,
+  userId: string,
+  review: AttentionReviewState,
+): Promise<void> {
+  await ctx.state.set(
+    { scopeKind: "company", scopeId: companyId, stateKey: userReviewStateKey(userId) },
+    review,
+  );
 }
 
 export function isInvocationScopeDenied(error: unknown): boolean {

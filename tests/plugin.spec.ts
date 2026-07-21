@@ -282,6 +282,39 @@ function mockApprovalApi(
   });
 }
 
+function userActorOptions(companyId: string, userId = "user-1") {
+  return {
+    companyId,
+    actor: {
+      type: "user" as const,
+      userId,
+      agentId: null,
+      runId: null,
+      companyId,
+    },
+  };
+}
+
+async function performUserAction<T = unknown>(
+  harness: ReturnType<typeof createTestHarness>,
+  key: string,
+  params: Record<string, unknown>,
+  userId = "user-1",
+): Promise<T> {
+  const companyId = String(params.companyId);
+  return harness.performAction<T>(key, params, userActorOptions(companyId, userId));
+}
+
+async function getPersonalData<T = unknown>(
+  harness: ReturnType<typeof createTestHarness>,
+  key: string,
+  params: Record<string, unknown>,
+  userId = "user-1",
+): Promise<T> {
+  const companyId = String(params.companyId);
+  return harness.getData<T>(key, params, userActorOptions(companyId, userId));
+}
+
 describe("paperclip aperture", () => {
   it("declares the Focus sidebar entry with its custom UI", () => {
     expect(manifest.ui?.slots).toEqual(expect.arrayContaining([
@@ -314,7 +347,7 @@ describe("paperclip aperture", () => {
     expect(snapshot.now?.title).toBe("Approve production deploy");
     expect(snapshot.counts.now).toBe(1);
 
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-1",
       taskId: snapshot.now?.taskId,
       interactionId: snapshot.now?.interactionId,
@@ -426,7 +459,7 @@ describe("paperclip aperture", () => {
     );
 
     const initial = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-focus-hold" });
-    const response = await harness.performAction<{ ok: boolean; snapshot: AttentionSnapshot }>("engage-focus", {
+    const response = await performUserAction<{ ok: boolean; snapshot: AttentionSnapshot }>(harness, "engage-focus", {
       companyId: "company-focus-hold",
       taskId: initial.now?.taskId,
       interactionId: initial.now?.interactionId,
@@ -468,7 +501,7 @@ describe("paperclip aperture", () => {
     );
 
     const snapshot = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-viewed-signal" });
-    await harness.performAction("mark-attention-viewed", {
+    await performUserAction(harness, "mark-attention-viewed", {
       companyId: "company-viewed-signal",
       taskId: snapshot.now?.taskId,
       interactionId: snapshot.now?.interactionId,
@@ -514,7 +547,7 @@ describe("paperclip aperture", () => {
       { companyId: "company-presence", entityId: "approval-1", entityType: "approval" },
     );
 
-    await harness.performAction("set-focus-presence", {
+    await performUserAction(harness, "set-focus-presence", {
       companyId: "company-presence",
       presence: "absent",
     });
@@ -523,7 +556,7 @@ describe("paperclip aperture", () => {
     });
     expect(diagnostics.operatorPresence).toBe("absent");
 
-    await harness.performAction("set-focus-presence", {
+    await performUserAction(harness, "set-focus-presence", {
       companyId: "company-presence",
       presence: "present",
     });
@@ -724,7 +757,7 @@ describe("paperclip aperture", () => {
     const initial = await firstHarness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-approval-response" });
     expect(initial.now?.taskId).toBe("approval:approval-response-1");
 
-    await firstHarness.performAction("record-approval-response", {
+    await performUserAction(firstHarness, "record-approval-response", {
       companyId: "company-approval-response",
       taskId: initial.now?.taskId,
       interactionId: initial.now?.interactionId,
@@ -769,14 +802,14 @@ describe("paperclip aperture", () => {
     await plugin.definition.setup(harness.ctx);
     mockApprovalApi(harness);
 
-    await harness.performAction("record-approval-response", {
+    await performUserAction(harness, "record-approval-response", {
       companyId: "company-approval-ui-only",
       taskId: "approval:approval-ui-only-1",
       interactionId: "approval:approval-ui-only-1:approval",
       decision: "request-revision",
     });
 
-    const review = await harness.getData<AttentionReviewState>("attention-review", { companyId: "company-approval-ui-only" });
+    const review = await getPersonalData<AttentionReviewState>(harness, "attention-review", { companyId: "company-approval-ui-only" });
     expect(review.frames["approval:approval-ui-only-1"]?.suppressedAt).toBeTruthy();
 
     const exported = await harness.getData<AttentionExport>("attention-export", { companyId: "company-approval-ui-only" });
@@ -824,7 +857,7 @@ describe("paperclip aperture", () => {
     expect(rebuilt.now?.title).toBe(original.now?.title);
     expect(rebuilt.counts.now).toBe(1);
 
-    await secondHarness.performAction("acknowledge-frame", {
+    await performUserAction(secondHarness, "acknowledge-frame", {
       companyId: "company-replay",
       taskId: rebuilt.now?.taskId,
       interactionId: rebuilt.now?.interactionId,
@@ -835,7 +868,7 @@ describe("paperclip aperture", () => {
     expect(cleared.counts.now).toBe(0);
   });
 
-  it("reconstructs acknowledged suppression from the ledger after restart even without persisted review state", async () => {
+  it("restores acknowledged suppression from viewer-scoped review state after restart", async () => {
     const firstHarness = createTestHarness({ manifest });
     await plugin.definition.setup(firstHarness.ctx);
     firstHarness.seed({
@@ -844,7 +877,7 @@ describe("paperclip aperture", () => {
     });
 
     const initial = await firstHarness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-review-replay" });
-    await firstHarness.performAction("acknowledge-frame", {
+    await performUserAction(firstHarness, "acknowledge-frame", {
       companyId: "company-review-replay",
       taskId: initial.now?.taskId,
       interactionId: initial.now?.interactionId,
@@ -857,6 +890,11 @@ describe("paperclip aperture", () => {
     });
     const persistedLedger = (persistedState as { payload?: { ledger?: unknown } })?.payload?.ledger;
     const persistedSnapshot = (persistedState as { payload?: { snapshot?: unknown } })?.payload?.snapshot;
+    const persistedUserReview = firstHarness.getState({
+      scopeKind: "company",
+      scopeId: "company-review-replay",
+      stateKey: "attention-review:user:user-1",
+    });
 
     const secondHarness = createTestHarness({ manifest });
     await plugin.definition.setup(secondHarness.ctx);
@@ -872,13 +910,21 @@ describe("paperclip aperture", () => {
       { scopeKind: "company", scopeId: "company-review-replay", stateKey: ATTENTION_SNAPSHOT_STATE_KEY },
       persistedSnapshot,
     );
+    await secondHarness.ctx.state.set(
+      { scopeKind: "company", scopeId: "company-review-replay", stateKey: "attention-review:user:user-1" },
+      persistedUserReview,
+    );
 
-    const review = await secondHarness.getData<AttentionReviewState>("attention-review", { companyId: "company-review-replay" });
+    const review = await getPersonalData<AttentionReviewState>(secondHarness, "attention-review", { companyId: "company-review-replay" });
     expect(review.frames["issue:issue-1"]?.suppressedAt).toBeTruthy();
 
-    const rebuilt = await secondHarness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-review-replay" });
-    expect(rebuilt.now).toBeNull();
-    expect(rebuilt.counts.total).toBe(0);
+    secondHarness.seed({
+      issues: [createIssue({ companyId: "company-review-replay", assigneeUserId: "user-1" })],
+      issueComments: [createIssueComment({ companyId: "company-review-replay" })],
+    });
+    const rebuilt = await getPersonalData<{ snapshot: AttentionSnapshot }>(secondHarness, "attention-display", { companyId: "company-review-replay" });
+    expect(rebuilt.snapshot.now).toBeNull();
+    expect(rebuilt.snapshot.counts.total).toBe(0);
   });
 
   it("hydrates from the legacy split state keys for backwards compatibility", async () => {
@@ -1298,20 +1344,20 @@ describe("paperclip aperture", () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment()],
     });
 
-    const initial = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const initial = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(initial.now?.taskId).toBe("issue:issue-1");
 
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-live",
       taskId: initial.now?.taskId,
       interactionId: initial.now?.interactionId,
     });
 
-    const suppressed = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const suppressed = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(suppressed.now).toBeNull();
     expect(suppressed.counts.total).toBe(0);
     const refreshedIssueUpdatedAt = new Date(Date.now() + 60_000);
@@ -1320,6 +1366,7 @@ describe("paperclip aperture", () => {
     harness.seed({
       issues: [
         createIssue({
+          assigneeUserId: "user-1",
           updatedAt: refreshedIssueUpdatedAt,
           description: "Fresh update from the operator is needed before the rollout can continue.",
         }),
@@ -1332,8 +1379,18 @@ describe("paperclip aperture", () => {
         }),
       ],
     });
+    await harness.emit(
+      "issue.comment.created",
+      {
+        identifier: "CAM-9",
+        issueTitle: "Blocked rollout follow-up",
+        bodySnippet: "New clarification request after the latest rollout attempt.",
+        status: "blocked",
+      },
+      { companyId: "company-live", entityId: "issue-1", entityType: "issue" },
+    );
 
-    const resurfaced = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const resurfaced = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(resurfaced.now?.taskId).toBe("issue:issue-1");
     expect(resurfaced.now?.summary).toBe("Blocked issue waiting on clarification before work can continue.");
     expect(resurfaced.now?.context?.items?.find((item) => item.id === "latest-comment")?.value).toContain("New clarification request");
@@ -1345,25 +1402,25 @@ describe("paperclip aperture", () => {
     await plugin.definition.setup(harness.ctx);
     const commentUpdatedAt = new Date("2026-03-19T10:05:00.000Z");
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment({ updatedAt: commentUpdatedAt, createdAt: commentUpdatedAt })],
     });
 
-    const initial = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const initial = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(initial.now?.taskId).toBe("issue:issue-1");
 
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-live",
       taskId: initial.now?.taskId,
       interactionId: initial.now?.interactionId,
     });
 
     harness.seed({
-      issues: [createIssue({ updatedAt: new Date("2026-03-19T10:20:00.000Z") })],
+      issues: [createIssue({ assigneeUserId: "user-1", updatedAt: new Date("2026-03-19T10:20:00.000Z") })],
       issueComments: [createIssueComment({ updatedAt: commentUpdatedAt, createdAt: commentUpdatedAt })],
     });
 
-    const suppressed = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const suppressed = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(suppressed.now).toBeNull();
     expect(suppressed.counts.total).toBe(0);
   });
@@ -1606,21 +1663,21 @@ describe("paperclip aperture", () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment()],
     });
 
-    const initial = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const initial = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(initial.now?.taskId).toBe("issue:issue-1");
     expect(initial.review?.unread.total).toBeGreaterThan(0);
 
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-live",
       taskId: initial.now?.taskId,
       interactionId: initial.now?.interactionId,
     });
 
-    const acknowledged = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const acknowledged = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(acknowledged.now).toBeNull();
     expect(acknowledged.counts.total).toBe(0);
     expect(acknowledged.review?.unread.total).toBe(0);
@@ -1639,11 +1696,11 @@ describe("paperclip aperture", () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment()],
     });
 
-    const initial = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const initial = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(initial.now?.taskId).toBe("issue:issue-1");
 
     const originalSet = harness.ctx.state.set.bind(harness.ctx.state);
@@ -1654,7 +1711,7 @@ describe("paperclip aperture", () => {
       return originalSet(descriptor, value);
     });
 
-    await expect(harness.performAction("acknowledge-frame", {
+    await expect(performUserAction(harness, "acknowledge-frame", {
       companyId: "company-live",
       taskId: initial.now?.taskId,
       interactionId: initial.now?.interactionId,
@@ -1666,7 +1723,7 @@ describe("paperclip aperture", () => {
     const failedHealth = await harness.getData<{ faultedCompanies: number }>("health", {});
     expect(failedHealth.faultedCompanies).toBe(1);
 
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-live",
       taskId: restored.now?.taskId,
       interactionId: restored.now?.interactionId,
@@ -1685,7 +1742,7 @@ describe("paperclip aperture", () => {
     });
 
     const snapshot = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
-    await harness.performAction("comment-on-issue", {
+    await performUserAction(harness, "comment-on-issue", {
       companyId: "company-live",
       taskId: snapshot.now?.taskId,
       issueId: "issue-1",
@@ -1733,7 +1790,7 @@ describe("paperclip aperture", () => {
     const trackSpy = vi.spyOn(harness.ctx.telemetry, "track")
       .mockRejectedValueOnce(new Error("telemetry unavailable"));
 
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-live",
       taskId: snapshot.now?.taskId,
       interactionId: snapshot.now?.interactionId,
@@ -1759,7 +1816,7 @@ describe("paperclip aperture", () => {
     const activitySpy = vi.spyOn(harness.ctx.activity, "log")
       .mockRejectedValueOnce(new Error("activity unavailable"));
 
-    await harness.performAction("comment-on-issue", {
+    await performUserAction(harness, "comment-on-issue", {
       companyId: "company-live",
       taskId: snapshot.now?.taskId,
       issueId: "issue-1",
@@ -1825,12 +1882,16 @@ describe("paperclip aperture", () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment()],
       agents: [createAgent()],
     });
 
-    const initial = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const initial = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+    )).snapshot;
     const taskIds = [
       ...(initial.now ? [initial.now.taskId] : []),
       ...initial.next.map((frame) => frame.taskId),
@@ -1839,16 +1900,101 @@ describe("paperclip aperture", () => {
 
     expect(initial.review?.unread.total).toBeGreaterThan(0);
 
-    await harness.performAction("mark-attention-seen", {
+    await performUserAction(harness, "mark-attention-seen", {
       companyId: "company-live",
       taskIds,
     });
 
-    const seen = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const seen = (await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", { companyId: "company-live" })).snapshot;
     expect(seen.now?.taskId).toBe(initial.now?.taskId);
     expect(seen.counts.total).toBe(initial.counts.total);
     expect(seen.review?.unread.total).toBe(0);
     expect(seen.review?.lastSeenAt).toBeTruthy();
+  });
+
+  it("isolates personal issue actions and review state between authenticated users", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    harness.seed({
+      issues: [
+        createIssue({ id: "issue-user-1", identifier: "CAM-11", assigneeUserId: "user-1" }),
+        createIssue({ id: "issue-user-2", identifier: "CAM-12", assigneeUserId: "user-2" }),
+      ],
+      issueComments: [
+        createIssueComment({ id: "comment-user-1", issueId: "issue-user-1" }),
+        createIssueComment({ id: "comment-user-2", issueId: "issue-user-2" }),
+      ],
+    });
+
+    const user1 = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-1",
+    )).snapshot;
+    const user2 = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-2",
+    )).snapshot;
+
+    expect([user1.now, ...user1.next].map((frame) => frame?.taskId)).toEqual(["issue:issue-user-1"]);
+    expect([user2.now, ...user2.next].map((frame) => frame?.taskId)).toEqual(["issue:issue-user-2"]);
+
+    await performUserAction(harness, "acknowledge-frame", {
+      companyId: "company-live",
+      taskId: user1.now?.taskId,
+      interactionId: user1.now?.interactionId,
+    }, "user-1");
+
+    const user1After = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-1",
+    )).snapshot;
+    const user2After = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-2",
+    )).snapshot;
+
+    expect(user1After.counts.total).toBe(0);
+    expect(user2After.now?.taskId).toBe("issue:issue-user-2");
+    expect(user2After.counts.total).toBe(1);
+  });
+
+  it("rejects personal Focus reads and actions without trusted authenticated context", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    harness.seed({
+      issues: [createIssue({ assigneeUserId: "user-1" })],
+      issueComments: [createIssueComment()],
+    });
+
+    await expect(harness.getData("attention-display", { companyId: "company-live" })).rejects.toThrow(
+      "Focus personal actions require an authenticated user",
+    );
+    await expect(harness.performAction("mark-attention-seen", {
+      companyId: "company-live",
+      taskIds: ["issue:issue-1"],
+    })).rejects.toThrow("Focus personal actions require an authenticated user");
+    await expect(harness.getData(
+      "attention-display",
+      { companyId: "company-live" },
+      {
+        companyId: "company-live",
+        actor: {
+          type: "system",
+          userId: null,
+          agentId: null,
+          runId: null,
+          companyId: "company-live",
+        },
+      },
+    )).rejects.toThrow("Focus personal actions require an authenticated user");
   });
 
   it("exports the ledger, responses, and reconciled snapshot for offline analysis", async () => {
@@ -1874,7 +2020,7 @@ describe("paperclip aperture", () => {
     expect(beforeResponse.displaySnapshot.now?.title).toBe("Approve launch cutover");
     expect(beforeResponse.overlayDiagnostics.summary.coreFrames).toBeGreaterThanOrEqual(1);
 
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-export",
       taskId: beforeResponse.reconciledSnapshot.now?.taskId,
       interactionId: beforeResponse.reconciledSnapshot.now?.interactionId,
@@ -1985,7 +2131,7 @@ describe("paperclip aperture", () => {
     await plugin.definition.setup(harness.ctx);
     mockApprovalApi(harness, [createApprovalRecord({ companyId: "company-display" })]);
 
-    const display = await harness.getData<{ snapshot: AttentionSnapshot }>("attention-display", {
+    const display = await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", {
       companyId: "company-display",
     });
 
@@ -1998,7 +2144,7 @@ describe("paperclip aperture", () => {
     await plugin.definition.setup(harness.ctx);
     const fetchSpy = vi.spyOn(harness.ctx.http, "fetch");
 
-    const display = await harness.getData<{ snapshot: AttentionSnapshot }>("attention-display", {
+    const display = await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", {
       companyId: "company-display-no-api",
     });
 
@@ -2023,7 +2169,7 @@ describe("paperclip aperture", () => {
       new Error("Request blocked: private/reserved ranges are unavailable"),
     );
 
-    const display = await harness.getData<{ snapshot: AttentionSnapshot }>("attention-display", {
+    const display = await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", {
       companyId: "company-display-reserved-range",
     });
 
@@ -2092,19 +2238,13 @@ describe("paperclip aperture", () => {
         lanePath: {
           core: null,
           reconciled: "now",
-          display: null,
+          display: "now",
         },
         changes: expect.arrayContaining([
           expect.objectContaining({
             stage: "reconciled",
             kind: "introduced",
             toLane: "now",
-          }),
-          expect.objectContaining({
-            stage: "display",
-            kind: "removed",
-            fromLane: "now",
-            toLane: null,
           }),
         ]),
       }),
@@ -2166,7 +2306,7 @@ describe("paperclip aperture", () => {
         lanePath: {
           core: "now",
           reconciled: "next",
-          display: null,
+          display: "next",
         },
         changes: expect.arrayContaining([
           expect.objectContaining({
@@ -2174,12 +2314,6 @@ describe("paperclip aperture", () => {
             kind: "moved",
             fromLane: "now",
             toLane: "next",
-          }),
-          expect.objectContaining({
-            stage: "display",
-            kind: "removed",
-            fromLane: "next",
-            toLane: null,
           }),
         ]),
       }),
@@ -2207,7 +2341,7 @@ describe("paperclip aperture", () => {
     harness.ctx.issues.listComments = listComments;
     harness.ctx.issues.documents.list = listDocuments;
 
-    await harness.getData("attention-display", { companyId: "company-live" });
+    await getPersonalData(harness, "attention-display", { companyId: "company-live" });
     const issueCallsAfterFirstRead = listIssues.mock.calls.length;
     const commentCallsAfterFirstRead = listComments.mock.calls.length;
     const documentCallsAfterFirstRead = listDocuments.mock.calls.length;
@@ -2217,7 +2351,7 @@ describe("paperclip aperture", () => {
       [expect.objectContaining({ status: "in_review", includePluginOperations: false })],
     ]));
 
-    await harness.getData("attention-display", { companyId: "company-live" });
+    await getPersonalData(harness, "attention-display", { companyId: "company-live" });
 
     expect(listIssues.mock.calls.length).toBe(issueCallsAfterFirstRead);
     expect(listComments.mock.calls.length).toBe(commentCallsAfterFirstRead);
@@ -2234,7 +2368,7 @@ describe("paperclip aperture", () => {
       { companyId: "company-live", entityId: "issue-1", entityType: "issue" },
     );
 
-    await harness.getData("attention-display", { companyId: "company-live" });
+    await getPersonalData(harness, "attention-display", { companyId: "company-live" });
 
     expect(listIssues.mock.calls.length).toBeGreaterThan(issueCallsAfterFirstRead);
     expect(listComments.mock.calls.length).toBe(commentCallsAfterFirstRead);
@@ -2301,6 +2435,25 @@ describe("paperclip aperture", () => {
     ]));
   });
 
+  it("prunes a stale reconciled issue after it leaves live host attention states", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, []);
+    harness.seed({ issues: [createIssue({ companyId: "company-issue-clear", status: "blocked" })] });
+
+    const initial = await harness.getData<AttentionSnapshot>("attention-summary", {
+      companyId: "company-issue-clear",
+    });
+    expect([initial.now, ...initial.next, ...initial.ambient].some((item) => item?.taskId === "issue:issue-1")).toBe(true);
+
+    harness.seed({ issues: [createIssue({ companyId: "company-issue-clear", status: "cancelled" })] });
+    const cleared = await harness.getData<AttentionSnapshot>("attention-summary", {
+      companyId: "company-issue-clear",
+    });
+
+    expect([cleared.now, ...cleared.next, ...cleared.ambient].some((item) => item?.taskId === "issue:issue-1")).toBe(false);
+  });
+
   it("exports a lab-compatible replay scenario from the attention ledger", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
@@ -2323,7 +2476,7 @@ describe("paperclip aperture", () => {
     expect(beforeResponse.expectations?.finalNowInteractionId).toBeTruthy();
 
     const snapshot = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-replay-export" });
-    await harness.performAction("acknowledge-frame", {
+    await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-replay-export",
       taskId: snapshot.now?.taskId,
       interactionId: snapshot.now?.interactionId,

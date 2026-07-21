@@ -44,7 +44,7 @@ describe("personal operator action projection", () => {
       counts: { now: 1, next: 3, ambient: 0, total: 4 },
     };
 
-    const projected = projectOperatorActionSnapshot(source, createEmptyReviewState(companyId));
+    const projected = projectOperatorActionSnapshot(source, createEmptyReviewState(companyId), "user-1");
 
     expect(projected.counts).toEqual({ now: 0, next: 0, ambient: 0, total: 0 });
     expect(projected.review?.unread.total).toBe(0);
@@ -70,7 +70,7 @@ describe("personal operator action projection", () => {
       counts: { now: 0, next: 4, ambient: 0, total: 4 },
     };
 
-    const projected = projectOperatorActionSnapshot(source, createEmptyReviewState(companyId));
+    const projected = projectOperatorActionSnapshot(source, createEmptyReviewState(companyId), "user-1");
 
     expect(projected.counts.total).toBe(4);
     expect([projected.now, ...projected.next].map((item) => item?.taskId)).toEqual(expect.arrayContaining([
@@ -100,6 +100,40 @@ describe("personal operator action projection", () => {
       counts: { now: 0, next: 3, ambient: 0, total: 3 },
     };
 
-    expect(projectOperatorActionSnapshot(source, createEmptyReviewState(companyId)).counts.total).toBe(0);
+    expect(projectOperatorActionSnapshot(source, createEmptyReviewState(companyId), "user-1").counts.total).toBe(0);
+  });
+
+  it("isolates user-owned work and drops terminal recovery actions", () => {
+    const source = {
+      ...createEmptySnapshot(companyId),
+      updatedAt: "2026-07-21T00:00:00.000Z",
+      next: [
+        frame("issue:viewer", { entityType: "issue", issueAssigneeUserId: "user-1" }),
+        frame("issue:other-user", { entityType: "issue", issueAssigneeUserId: "user-2" }),
+        frame("issue:other-user-blocker", {
+          entityType: "issue",
+          blockedInboxAttention: { owner: { type: "user", userId: "user-2" } },
+        }),
+        frame("issue:resolved-recovery", {
+          entityType: "issue",
+          activeRecoveryAction: { ownerType: "user", ownerUserId: "user-1", status: "resolved" },
+        }),
+        frame("issue:active-recovery", {
+          entityType: "issue",
+          activeRecoveryAction: { ownerType: "user", ownerUserId: "user-1", status: "active" },
+        }),
+      ],
+      counts: { now: 0, next: 5, ambient: 0, total: 5 },
+    };
+
+    const projected = projectOperatorActionSnapshot(source, createEmptyReviewState(companyId), "user-1");
+    const taskIds = [projected.now, ...projected.next].map((item) => item?.taskId);
+    expect(taskIds).toEqual(expect.arrayContaining(["issue:viewer", "issue:active-recovery"]));
+    expect(taskIds).not.toEqual(expect.arrayContaining([
+      "issue:other-user",
+      "issue:other-user-blocker",
+      "issue:resolved-recovery",
+    ]));
+    expect(projected.counts.total).toBe(2);
   });
 });

@@ -5,7 +5,7 @@ import {
   isAttentionLedger,
   isAttentionReviewState,
 } from "../aperture/persisted-state.js";
-import { loadReconciledCandidates } from "../aperture/reconciliation.js";
+import { loadReconciledCandidates, mergeReconciledFrames } from "../aperture/reconciliation.js";
 import { buildOverlayDiagnostics } from "../aperture/overlay-diagnostics.js";
 import { mergeStoredFrames, type StoredFrameCandidate } from "../aperture/frame-model.js";
 import {
@@ -36,6 +36,9 @@ import {
   flushPendingAttentionState,
   isInvocationScopeDenied,
   loadPersistedAttentionState,
+  loadUserReviewState,
+  requireAuthenticatedUser,
+  type PluginRequestContext,
   requireCompanyId,
 } from "./shared.js";
 
@@ -291,7 +294,7 @@ async function loadReconciledAttentionSnapshot(
   const cacheKey = reconciliationCacheKey(store, companyId, config);
   if (options.preferCache && !options.freshHostData) {
     const cachedCandidates = store.getCachedReconciledCandidates(companyId, cacheKey);
-    if (cachedCandidates) return mergeStoredFrames(snapshot, companyId, cachedCandidates, reviewState);
+    if (cachedCandidates) return mergeReconciledFrames(snapshot, companyId, cachedCandidates, reviewState);
   }
 
   let candidates: StoredFrameCandidate[];
@@ -307,7 +310,7 @@ async function loadReconciledAttentionSnapshot(
     });
     return snapshot;
   }
-  const reconciled = mergeStoredFrames(snapshot, companyId, candidates, reviewState);
+  const reconciled = mergeReconciledFrames(snapshot, companyId, candidates, reviewState);
   if (options.preferCache && !options.freshHostData) {
     store.setCachedReconciledCandidates(companyId, cacheKey, candidates);
   }
@@ -353,10 +356,7 @@ async function loadDisplaySnapshot(
 
   return {
     reconciledSnapshot,
-    displaySnapshot: projectOperatorActionSnapshot(
-      mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState),
-      reviewState,
-    ),
+    displaySnapshot: mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState),
   };
 }
 
@@ -401,15 +401,18 @@ export function registerDataHandlers(ctx: PluginContext, store: ApertureCompanyS
     return reconciledSnapshot ?? createEmptySnapshot(companyId);
   });
 
-  ctx.data.register("attention-display", async (params) => {
+  ctx.data.register("attention-display", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
-    const { snapshot, reviewState } = await ensureAttentionState(ctx, store, companyId);
-    const { displaySnapshot } = await loadDisplaySnapshot(ctx, store, companyId, snapshot, reviewState);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
+    const { snapshot, reviewState: companyReviewState } = await ensureAttentionState(ctx, store, companyId);
+    const viewerReviewState = await loadUserReviewState(ctx, companyId, viewerUserId);
+    const { displaySnapshot } = await loadDisplaySnapshot(ctx, store, companyId, snapshot, companyReviewState);
+    const personalSnapshot = projectOperatorActionSnapshot(displaySnapshot, viewerReviewState, viewerUserId);
 
     return {
       companyId,
-      snapshot: displaySnapshot ?? createEmptySnapshot(companyId),
-      reviewState,
+      snapshot: personalSnapshot,
+      reviewState: viewerReviewState,
     } satisfies AttentionDisplayPayload;
   });
 
@@ -423,10 +426,7 @@ export function registerDataHandlers(ctx: PluginContext, store: ApertureCompanyS
       freshHostData: true,
     });
     const approvals = await loadWorkerApprovals(ctx, store, companyId);
-    const displaySnapshot = projectOperatorActionSnapshot(
-      mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState),
-      reviewState,
-    );
+    const displaySnapshot = mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState);
     const ledgerWindow = tailWindow(baseLedger, entryLimit);
     const traceWindow = tailWindow(store.getTraces(companyId), traceLimit);
 
@@ -523,9 +523,9 @@ export function registerDataHandlers(ctx: PluginContext, store: ApertureCompanyS
     } satisfies AttentionReplayScenario;
   });
 
-  ctx.data.register("attention-review", async (params) => {
+  ctx.data.register("attention-review", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
-    const { reviewState } = await ensureAttentionState(ctx, store, companyId);
-    return reviewState;
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
+    return loadUserReviewState(ctx, companyId, viewerUserId);
   });
 }

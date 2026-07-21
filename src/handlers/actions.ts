@@ -8,26 +8,23 @@ import { createEmptyReviewState, createEmptySnapshot, type AttentionLedgerOverla
 import { submitApprovalDecision } from "../host/paperclip-approvals.js";
 import {
   emitAttentionUpdate,
-  loadPersistedAttentionState,
+  loadUserReviewState,
   logFocusActivity,
+  persistUserReviewState,
+  requireAuthenticatedUser,
   requireCompanyId,
   requireStringParam,
   runAttentionMutation,
   trackFocusTelemetry,
+  type PluginRequestContext,
 } from "./shared.js";
 
 async function loadReviewState(
   ctx: PluginContext,
-  store: ApertureCompanyStore,
   companyId: string,
+  userId: string,
 ): Promise<AttentionReviewState> {
-  const liveReview = store.getReview(companyId);
-  if (liveReview) return liveReview;
-
-  const persisted = await loadPersistedAttentionState(ctx, companyId);
-  if (persisted?.review) return persisted.review;
-
-  return createEmptyReviewState(companyId);
+  return loadUserReviewState(ctx, companyId, userId);
 }
 
 function buildSeenReviewState(
@@ -146,8 +143,9 @@ function approvalIdFromTaskId(taskId: string): string | null {
 }
 
 export function registerActionHandlers(ctx: PluginContext, store: ApertureCompanyStore): void {
-  ctx.actions.register("set-focus-presence", async (params) => {
+  ctx.actions.register("set-focus-presence", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    requireAuthenticatedUser(context, companyId);
     const requestedPresence = requireStringParam(params, "presence");
     const presence = requestedPresence === "absent" ? "absent" : "present";
     return {
@@ -156,8 +154,9 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     };
   });
 
-  ctx.actions.register("mark-attention-viewed", async (params) => {
+  ctx.actions.register("mark-attention-viewed", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
     const surface = typeof params.surface === "string" && params.surface.trim().length > 0
@@ -197,8 +196,9 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot, changed };
   });
 
-  ctx.actions.register("engage-focus", async (params) => {
+  ctx.actions.register("engage-focus", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
     const durationMs = typeof params.durationMs === "number" && Number.isFinite(params.durationMs)
@@ -275,8 +275,9 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot, changed };
   });
 
-  ctx.actions.register("acknowledge-frame", async (params) => {
+  ctx.actions.register("acknowledge-frame", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
     const response = mapDecisionToResponse({ taskId, interactionId, action: "acknowledge" });
@@ -291,12 +292,13 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
       apertureResponse: response,
     };
     const currentSnapshot = store.getSnapshot(companyId);
-    const currentReview = await loadReviewState(ctx, store, companyId);
+    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
     const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
     const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
       const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
-      return { ledger, snapshot, review };
+      return { ledger, snapshot };
     });
+    await persistUserReviewState(ctx, companyId, viewerUserId, review);
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -310,8 +312,9 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot };
   });
 
-  ctx.actions.register("comment-on-issue", async (params) => {
+  ctx.actions.register("comment-on-issue", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const issueId = requireStringParam(params, "issueId");
     const body = requireStringParam(params, "body").trim();
@@ -326,7 +329,7 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
 
     const comment = await ctx.issues.createComment(issueId, body, companyId);
     const currentSnapshot = store.getSnapshot(companyId);
-    const currentReview = await loadReviewState(ctx, store, companyId);
+    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
     const review = buildSeenReviewState(currentReview, companyId, [taskId], false);
     const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
       store.invalidateHostCache(companyId, {
@@ -336,13 +339,12 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
         ],
         prefixes: ["issues:blocked", "issues:in_review"],
       });
-      store.setReview(companyId, review);
       return {
         ledger: store.getLedger(companyId),
         snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
-        review,
       };
     });
+    await persistUserReviewState(ctx, companyId, viewerUserId, review);
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -367,8 +369,9 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, comment, review };
   });
 
-  ctx.actions.register("record-approval-response", async (params) => {
+  ctx.actions.register("record-approval-response", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
     const decision = requireStringParam(params, "decision");
@@ -404,7 +407,7 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     await submitApprovalDecision(ctx, approvalId, decision as "approve" | "reject" | "request-revision", config);
     store.invalidateApprovals(companyId);
 
-    const currentReview = await loadReviewState(ctx, store, companyId);
+    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
     const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
     const currentSnapshot = store.getSnapshot(companyId);
     const shouldIngest = snapshotContainsTask(currentSnapshot, taskId);
@@ -412,7 +415,7 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
       if (shouldIngest) {
         const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
-        return { ledger, snapshot, review };
+        return { ledger, snapshot };
       }
 
       const overlayEntry: AttentionLedgerOverlayResponseEntry = {
@@ -430,9 +433,9 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
       return {
         ledger,
         snapshot,
-        review,
       };
     });
+    await persistUserReviewState(ctx, companyId, viewerUserId, review);
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -463,24 +466,19 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot, review };
   });
 
-  ctx.actions.register("mark-attention-seen", async (params) => {
+  ctx.actions.register("mark-attention-seen", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskIds = Array.isArray(params.taskIds)
       ? params.taskIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
     if (taskIds.length === 0) {
       throw new Error("taskIds must include at least one frame task id.");
     }
-    const currentReview = await loadReviewState(ctx, store, companyId);
+    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
     const review = buildSeenReviewState(currentReview, companyId, taskIds);
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      store.setReview(companyId, review);
-      return {
-        ledger: store.getLedger(companyId),
-        snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
-        review,
-      };
-    });
+    await persistUserReviewState(ctx, companyId, viewerUserId, review);
+    const snapshot = store.getSnapshot(companyId) ?? createEmptySnapshot(companyId);
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",

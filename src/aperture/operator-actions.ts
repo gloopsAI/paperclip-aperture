@@ -8,15 +8,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function hasHumanBlockedInboxOwner(metadata: Record<string, unknown> | null): boolean {
+function hasViewerBlockedInboxOwner(metadata: Record<string, unknown> | null, viewerUserId: string): boolean {
   const blockedInboxAttention = asRecord(metadata?.blockedInboxAttention);
   const owner = asRecord(blockedInboxAttention?.owner);
-  return owner?.type === "user" || owner?.type === "board";
+  return owner?.type === "board" || (owner?.type === "user" && owner.userId === viewerUserId);
 }
 
-function hasHumanRecoveryOwner(metadata: Record<string, unknown> | null): boolean {
+function hasViewerRecoveryOwner(metadata: Record<string, unknown> | null, viewerUserId: string): boolean {
   const recovery = asRecord(metadata?.activeRecoveryAction);
-  return recovery?.ownerType === "user" || recovery?.ownerType === "board";
+  if (recovery?.status !== "active" && recovery?.status !== "escalated") return false;
+  return recovery.ownerType === "board"
+    || (recovery.ownerType === "user" && recovery.ownerUserId === viewerUserId);
 }
 
 /**
@@ -24,7 +26,8 @@ function hasHumanRecoveryOwner(metadata: Record<string, unknown> | null): boolea
  * Keep telemetry in the reconciled snapshot/export, but only project records
  * with explicit human authority into the display snapshot.
  */
-export function isOperatorActionFrame(frame: StoredAttentionFrame): boolean {
+export function isOperatorActionFrame(frame: StoredAttentionFrame, viewerUserId: string): boolean {
+  if (!viewerUserId) return false;
   const focus = readFocusMetadata(frame);
   const metadata = asRecord(frame.metadata);
 
@@ -41,17 +44,17 @@ export function isOperatorActionFrame(frame: StoredAttentionFrame): boolean {
   }
 
   if (focus.entityType !== "issue") return false;
-  if (focus.issueAssigneeUserId) return true;
-  if (hasHumanBlockedInboxOwner(metadata)) return true;
-  if (hasHumanRecoveryOwner(metadata)) return true;
+  if (focus.issueAssigneeUserId === viewerUserId) return true;
+  if (hasViewerBlockedInboxOwner(metadata, viewerUserId)) return true;
+  if (hasViewerRecoveryOwner(metadata, viewerUserId)) return true;
 
   return false;
 }
 
-function snapshotCandidates(snapshot: AttentionSnapshot): StoredFrameCandidate[] {
+function snapshotCandidates(snapshot: AttentionSnapshot, viewerUserId: string): StoredFrameCandidate[] {
   const candidates: StoredFrameCandidate[] = [];
   const append = (frame: StoredAttentionFrame | null, lane: FrameLane) => {
-    if (frame && isOperatorActionFrame(frame)) candidates.push({ frame, lane });
+    if (frame && isOperatorActionFrame(frame, viewerUserId)) candidates.push({ frame, lane });
   };
 
   append(snapshot.now, "now");
@@ -63,8 +66,9 @@ function snapshotCandidates(snapshot: AttentionSnapshot): StoredFrameCandidate[]
 export function projectOperatorActionSnapshot(
   snapshot: AttentionSnapshot,
   review: AttentionReviewState | null,
+  viewerUserId: string,
 ): AttentionSnapshot {
-  const candidates = snapshotCandidates(snapshot);
+  const candidates = snapshotCandidates(snapshot, viewerUserId);
   if (candidates.length === 0) {
     return attachReviewState({
       ...createEmptySnapshot(snapshot.companyId),
