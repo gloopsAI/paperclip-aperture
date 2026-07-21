@@ -264,7 +264,7 @@ function mockApprovalApi(
 ) {
   harness.setConfig({ paperclipApiBase: "http://paperclip.test" });
   harness.ctx.http.fetch = vi.fn(async (url: string, init?: RequestInit) => {
-    if (url.includes("/api/companies/") && url.includes("/approvals?status=pending")) {
+    if (url.includes("/api/companies/") && url.endsWith("/approvals")) {
       return new Response(JSON.stringify(approvals), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -2314,6 +2314,31 @@ describe("paperclip aperture", () => {
 
     expect(display.snapshot.now?.taskId).toBe("approval:approval-1");
     expect(display.snapshot.now?.title).toBe("Approve launch cutover");
+  });
+
+  it("includes revision-requested approvals from the unfiltered host approval collection", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [
+      createApprovalRecord({
+        id: "approval-revision-requested",
+        companyId: "company-display-revision",
+        status: "revision_requested",
+      }),
+      createApprovalRecord({
+        id: "approval-approved",
+        companyId: "company-display-revision",
+        status: "approved",
+      }),
+    ]);
+
+    const display = await getPersonalData<{ snapshot: AttentionSnapshot }>(harness, "attention-display", {
+      companyId: "company-display-revision",
+    });
+
+    expect(display.snapshot.now?.taskId).toBe("approval:approval-revision-requested");
+    expect([display.snapshot.now, ...display.snapshot.next].map((frame) => frame?.taskId))
+      .not.toContain("approval:approval-approved");
   });
 
   it("stays quiet when no Paperclip approval API base is configured", async () => {
