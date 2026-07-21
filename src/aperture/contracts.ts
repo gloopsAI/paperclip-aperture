@@ -29,6 +29,8 @@ export type FocusDecisionMetadata = {
 
 export type FocusFrameMetadata = {
   entityType?: string;
+  issueAssigneeAgentId?: string | null;
+  issueAssigneeUserId?: string | null;
   issueStatus?: string;
   issuePriority?: string;
   approvalStatus?: string;
@@ -94,6 +96,8 @@ export function readFocusMetadata(frame: StoredAttentionFrame): FocusFrameMetada
 
   return {
     entityType: readString(metadata?.entityType),
+    issueAssigneeAgentId: readNullableString(metadata?.issueAssigneeAgentId),
+    issueAssigneeUserId: readNullableString(metadata?.issueAssigneeUserId),
     issueStatus: readString(metadata?.issueStatus),
     issuePriority: readString(metadata?.issuePriority),
     approvalStatus: readString(metadata?.approvalStatus),

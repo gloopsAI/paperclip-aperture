@@ -84,9 +84,11 @@ export async function listPendingApprovals(
     return await paperclipApiFetch<ApprovalRecord[]>(
       ctx,
       config,
-      `/api/companies/${companyId}/approvals?status=pending`,
+      `/api/companies/${companyId}/approvals`,
       { method: "GET", retries: 2 },
-    );
+    ).then((approvals) => approvals.filter(
+      (approval) => approval.status === "pending" || approval.status === "revision_requested",
+    ));
   } catch (error) {
     if (isReservedRangeFetchFailure(error)) return [];
     throw error;

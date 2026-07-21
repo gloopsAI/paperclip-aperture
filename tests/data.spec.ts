@@ -3,7 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { ApertureCompanyStore } from "../src/aperture/core-store.js";
 import { registerDataHandlers } from "../src/handlers/data.js";
 
-type DataHandler = (params: Record<string, unknown>) => Promise<unknown>;
+type DataHandler = (
+  params: Record<string, unknown>,
+  context?: {
+    actor: { type: "user"; userId: string; agentId: null; runId: null; companyId: string };
+    companyId: string;
+  },
+) => Promise<unknown>;
 
 function invocationScopeDenied(method: string): Error {
   return new Error(`Plugin is not allowed to perform "${method}": the worker referenced a missing, expired, or unknown invocation scope`);
@@ -55,7 +61,19 @@ describe("data handlers", () => {
 
     const handler = harness.handlers.get("attention-display");
     expect(handler).toBeTypeOf("function");
-    const payload = await handler?.({ companyId: "company-data" });
+    const payload = await handler?.(
+      { companyId: "company-data" },
+      {
+        actor: {
+          type: "user",
+          userId: "user-data",
+          agentId: null,
+          runId: null,
+          companyId: "company-data",
+        },
+        companyId: "company-data",
+      },
+    );
 
     expect(payload).toMatchObject({
       companyId: "company-data",

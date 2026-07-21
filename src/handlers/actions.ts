@@ -1,33 +1,73 @@
-import type { PluginContext } from "@paperclipai/plugin-sdk";
+import type { Issue, PluginContext } from "@paperclipai/plugin-sdk";
 import type { AttentionSignal } from "@tomismeta/aperture-core";
 import type { ApertureCompanyStore } from "../aperture/core-store.js";
 import { readFocusMetadata } from "../aperture/contracts.js";
 import { mapDecisionToResponse } from "../aperture/response-mapper.js";
 import { parseTaskId, taskIdMatchesKind, taskKind } from "../aperture/task-ref.js";
 import { createEmptyReviewState, createEmptySnapshot, type AttentionLedgerOverlayResponseEntry, type AttentionLedgerResponseEntry, type AttentionLedgerSignalEntry, type AttentionReviewState, type AttentionSnapshot, type StoredAttentionFrame } from "../aperture/types.js";
-import { submitApprovalDecision } from "../host/paperclip-approvals.js";
+import { listPendingApprovals, submitApprovalDecision } from "../host/paperclip-approvals.js";
 import {
   emitAttentionUpdate,
-  loadPersistedAttentionState,
   logFocusActivity,
+  requireAuthenticatedUser,
   requireCompanyId,
   requireStringParam,
   runAttentionMutation,
+  runUserReviewMutation,
   trackFocusTelemetry,
+  type PluginRequestContext,
 } from "./shared.js";
 
-async function loadReviewState(
+function viewerOwnsIssueAction(issue: Issue, viewerUserId: string): boolean {
+  if (issue.assigneeUserId === viewerUserId) return true;
+
+  const blockedOwner = issue.blockedInboxAttention?.owner;
+  if (blockedOwner?.type === "board") return true;
+  if (blockedOwner?.type === "user" && blockedOwner.userId === viewerUserId) return true;
+
+  const recovery = issue.activeRecoveryAction;
+  if (recovery?.status !== "active" && recovery?.status !== "escalated") return false;
+  if (recovery.ownerType === "board") return true;
+  return recovery.ownerType === "user" && recovery.ownerUserId === viewerUserId;
+}
+
+function assertInteractionMatchesTask(taskId: string, interactionId: string): void {
+  if (!interactionId.startsWith(`${taskId}:`)) {
+    throw new Error("Focus interaction target does not match the selected frame.");
+  }
+}
+
+async function assertViewerCanActOnTask(
   ctx: PluginContext,
-  store: ApertureCompanyStore,
   companyId: string,
-): Promise<AttentionReviewState> {
-  const liveReview = store.getReview(companyId);
-  if (liveReview) return liveReview;
+  viewerUserId: string,
+  taskId: string,
+  interactionId?: string,
+): Promise<void> {
+  if (interactionId) assertInteractionMatchesTask(taskId, interactionId);
 
-  const persisted = await loadPersistedAttentionState(ctx, companyId);
-  if (persisted?.review) return persisted.review;
+  const taskRef = parseTaskId(taskId);
+  if (!taskRef) throw new Error("Focus action requires a valid task target.");
+  if (taskRef.kind === "approval") {
+    const config = await ctx.config.get();
+    const approvals = await listPendingApprovals(ctx, companyId, config);
+    if (!approvals.some((approval) => (
+      approval.id === taskRef.id
+      && approval.companyId === companyId
+      && (approval.status === "pending" || approval.status === "revision_requested")
+    ))) {
+      throw new Error("Focus approval target is not a current pending approval in the active company.");
+    }
+    return;
+  }
+  if (taskRef.kind !== "issue") {
+    throw new Error("Focus action target is not a current user or board action.");
+  }
 
-  return createEmptyReviewState(companyId);
+  const issue = await ctx.issues.get(taskRef.id, companyId);
+  if (!issue || !viewerOwnsIssueAction(issue, viewerUserId)) {
+    throw new Error("Focus action target is not assigned to the authenticated user or board.");
+  }
 }
 
 function buildSeenReviewState(
@@ -146,8 +186,9 @@ function approvalIdFromTaskId(taskId: string): string | null {
 }
 
 export function registerActionHandlers(ctx: PluginContext, store: ApertureCompanyStore): void {
-  ctx.actions.register("set-focus-presence", async (params) => {
+  ctx.actions.register("set-focus-presence", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    requireAuthenticatedUser(context, companyId);
     const requestedPresence = requireStringParam(params, "presence");
     const presence = requestedPresence === "absent" ? "absent" : "present";
     return {
@@ -156,10 +197,12 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     };
   });
 
-  ctx.actions.register("mark-attention-viewed", async (params) => {
+  ctx.actions.register("mark-attention-viewed", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
     const surface = typeof params.surface === "string" && params.surface.trim().length > 0
       ? params.surface.trim()
       : "focus";
@@ -197,10 +240,12 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot, changed };
   });
 
-  ctx.actions.register("engage-focus", async (params) => {
+  ctx.actions.register("engage-focus", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
     const durationMs = typeof params.durationMs === "number" && Number.isFinite(params.durationMs)
       ? Math.max(25, Math.floor(params.durationMs))
       : undefined;
@@ -275,28 +320,36 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot, changed };
   });
 
-  ctx.actions.register("acknowledge-frame", async (params) => {
+  ctx.actions.register("acknowledge-frame", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
-    const response = mapDecisionToResponse({ taskId, interactionId, action: "acknowledge" });
-    const ledgerEntry: AttentionLedgerResponseEntry = {
-      kind: "response",
-      id: `${taskId}:acknowledge:${Date.now()}`,
-      occurredAt: new Date().toISOString(),
-      source: {
-        eventType: "plugin.local.acknowledge",
-        entityId: taskId,
-      },
-      apertureResponse: response,
-    };
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
     const currentSnapshot = store.getSnapshot(companyId);
-    const currentReview = await loadReviewState(ctx, store, companyId);
-    const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
-      return { ledger, snapshot, review };
-    });
+    let snapshot = currentSnapshot ?? createEmptySnapshot(companyId);
+    if (taskIdMatchesKind(taskId, "approval")) {
+      const response = mapDecisionToResponse({ taskId, interactionId, action: "acknowledge" });
+      const ledgerEntry: AttentionLedgerResponseEntry = {
+        kind: "response",
+        id: `${taskId}:acknowledge:${Date.now()}`,
+        occurredAt: new Date().toISOString(),
+        source: {
+          eventType: "plugin.local.acknowledge",
+          entityId: taskId,
+        },
+        apertureResponse: response,
+      };
+      ({ snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
+        const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
+        return { ledger, snapshot };
+      }));
+    } else {
+      await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+        const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
+        return { review, result: undefined };
+      });
+    }
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -310,8 +363,9 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot };
   });
 
-  ctx.actions.register("comment-on-issue", async (params) => {
+  ctx.actions.register("comment-on-issue", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const issueId = requireStringParam(params, "issueId");
     const body = requireStringParam(params, "body").trim();
@@ -323,26 +377,48 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     if (taskRef.id !== issueId) {
       throw new Error("Issue comment target does not match the selected frame.");
     }
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId);
 
     const comment = await ctx.issues.createComment(issueId, body, companyId);
     const currentSnapshot = store.getSnapshot(companyId);
-    const currentReview = await loadReviewState(ctx, store, companyId);
-    const review = buildSeenReviewState(currentReview, companyId, [taskId], false);
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      store.invalidateHostCache(companyId, {
-        keys: [
-          `issue:${issueId}:detail`,
-          `issue:${issueId}:comments`,
-        ],
-        prefixes: ["issues:blocked", "issues:in_review"],
+    let review: AttentionReviewState | null = null;
+    try {
+      ({ review } = await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+        const review = buildSeenReviewState(currentReview, companyId, [taskId], false);
+        return { review, result: undefined };
+      }));
+    } catch (error) {
+      // The host comment is the authoritative side effect and may already be
+      // durable. Do not report it as failed (and invite a duplicate retry)
+      // merely because the optional viewer-read marker could not be stored.
+      ctx.logger.warn("Issue comment succeeded but viewer review state could not be updated.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
       });
-      store.setReview(companyId, review);
-      return {
-        ledger: store.getLedger(companyId),
-        snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
-        review,
-      };
-    });
+    }
+    let snapshot = store.getSnapshot(companyId) ?? createEmptySnapshot(companyId);
+    try {
+      ({ snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
+        store.invalidateHostCache(companyId, {
+          keys: [
+            `issue:${issueId}:detail`,
+            `issue:${issueId}:comments`,
+          ],
+          prefixes: ["issues:blocked", "issues:in_review"],
+        });
+        return {
+          ledger: store.getLedger(companyId),
+          snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
+        };
+      }));
+    } catch (error) {
+      ctx.logger.warn("Issue comment succeeded but local attention bookkeeping could not be persisted.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -367,11 +443,13 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, comment, review };
   });
 
-  ctx.actions.register("record-approval-response", async (params) => {
+  ctx.actions.register("record-approval-response", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
     const decision = requireStringParam(params, "decision");
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
 
     if (!taskIdMatchesKind(taskId, "approval")) {
       throw new Error("Approval responses can only be recorded for approval-backed frames.");
@@ -404,35 +482,57 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     await submitApprovalDecision(ctx, approvalId, decision as "approve" | "reject" | "request-revision", config);
     store.invalidateApprovals(companyId);
 
-    const currentReview = await loadReviewState(ctx, store, companyId);
-    const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
     const currentSnapshot = store.getSnapshot(companyId);
     const shouldIngest = snapshotContainsTask(currentSnapshot, taskId);
 
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      if (shouldIngest) {
-        const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
-        return { ledger, snapshot, review };
-      }
+    let snapshot = currentSnapshot ?? createEmptySnapshot(companyId);
+    try {
+      ({ snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
+        if (shouldIngest) {
+          const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
+          return { ledger, snapshot };
+        }
 
-      const overlayEntry: AttentionLedgerOverlayResponseEntry = {
-        kind: "overlay-response",
-        id: ledgerEntry.id,
-        occurredAt: ledgerEntry.occurredAt,
-        source: ledgerEntry.source,
-        apertureResponse: ledgerEntry.apertureResponse,
-        overlay: {
-          kind: "approval_overlay",
-          reason: "Approval frame came from the Paperclip approvals display adapter, not the replayed Core snapshot.",
-        },
-      };
-      const { ledger, snapshot } = store.applyOverlayResponse(companyId, overlayEntry);
-      return {
-        ledger,
-        snapshot,
-        review,
-      };
-    });
+        const overlayEntry: AttentionLedgerOverlayResponseEntry = {
+          kind: "overlay-response",
+          id: ledgerEntry.id,
+          occurredAt: ledgerEntry.occurredAt,
+          source: ledgerEntry.source,
+          apertureResponse: ledgerEntry.apertureResponse,
+          overlay: {
+            kind: "approval_overlay",
+            reason: "Approval frame came from the Paperclip approvals display adapter, not the replayed Core snapshot.",
+          },
+        };
+        const { ledger, snapshot } = store.applyOverlayResponse(companyId, overlayEntry);
+        return {
+          ledger,
+          snapshot,
+        };
+      }));
+    } catch (error) {
+      ctx.logger.warn("Approval succeeded but local attention bookkeeping could not be persisted.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    let review: AttentionReviewState | null = null;
+    try {
+      ({ review } = await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+        const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
+        return { review, result: undefined };
+      }));
+    } catch (error) {
+      // The approval endpoint is authoritative and idempotent with respect to
+      // the resulting status. A viewer-marker failure must not turn a real
+      // approval into a misleading failed action.
+      ctx.logger.warn("Approval succeeded but viewer review state could not be updated.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -463,24 +563,21 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     return { ok: true, snapshot, review };
   });
 
-  ctx.actions.register("mark-attention-seen", async (params) => {
+  ctx.actions.register("mark-attention-seen", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskIds = Array.isArray(params.taskIds)
       ? params.taskIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
     if (taskIds.length === 0) {
       throw new Error("taskIds must include at least one frame task id.");
     }
-    const currentReview = await loadReviewState(ctx, store, companyId);
-    const review = buildSeenReviewState(currentReview, companyId, taskIds);
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      store.setReview(companyId, review);
-      return {
-        ledger: store.getLedger(companyId),
-        snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
-        review,
-      };
+    await Promise.all(taskIds.map((taskId) => assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId)));
+    const { review } = await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+      const review = buildSeenReviewState(currentReview, companyId, taskIds);
+      return { review, result: undefined };
     });
+    const snapshot = store.getSnapshot(companyId) ?? createEmptySnapshot(companyId);
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
