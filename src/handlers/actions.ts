@@ -5,7 +5,7 @@ import { readFocusMetadata } from "../aperture/contracts.js";
 import { mapDecisionToResponse } from "../aperture/response-mapper.js";
 import { parseTaskId, taskIdMatchesKind, taskKind } from "../aperture/task-ref.js";
 import { createEmptyReviewState, createEmptySnapshot, type AttentionLedgerOverlayResponseEntry, type AttentionLedgerResponseEntry, type AttentionLedgerSignalEntry, type AttentionReviewState, type AttentionSnapshot, type StoredAttentionFrame } from "../aperture/types.js";
-import { submitApprovalDecision } from "../host/paperclip-approvals.js";
+import { listPendingApprovals, submitApprovalDecision } from "../host/paperclip-approvals.js";
 import {
   emitAttentionUpdate,
   logFocusActivity,
@@ -48,7 +48,18 @@ async function assertViewerCanActOnTask(
 
   const taskRef = parseTaskId(taskId);
   if (!taskRef) throw new Error("Focus action requires a valid task target.");
-  if (taskRef.kind === "approval") return;
+  if (taskRef.kind === "approval") {
+    const config = await ctx.config.get();
+    const approvals = await listPendingApprovals(ctx, companyId, config);
+    if (!approvals.some((approval) => (
+      approval.id === taskRef.id
+      && approval.companyId === companyId
+      && (approval.status === "pending" || approval.status === "revision_requested")
+    ))) {
+      throw new Error("Focus approval target is not a current pending approval in the active company.");
+    }
+    return;
+  }
   if (taskRef.kind !== "issue") {
     throw new Error("Focus action target is not a current user or board action.");
   }
@@ -386,19 +397,28 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      store.invalidateHostCache(companyId, {
-        keys: [
-          `issue:${issueId}:detail`,
-          `issue:${issueId}:comments`,
-        ],
-        prefixes: ["issues:blocked", "issues:in_review"],
+    let snapshot = store.getSnapshot(companyId) ?? createEmptySnapshot(companyId);
+    try {
+      ({ snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
+        store.invalidateHostCache(companyId, {
+          keys: [
+            `issue:${issueId}:detail`,
+            `issue:${issueId}:comments`,
+          ],
+          prefixes: ["issues:blocked", "issues:in_review"],
+        });
+        return {
+          ledger: store.getLedger(companyId),
+          snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
+        };
+      }));
+    } catch (error) {
+      ctx.logger.warn("Issue comment succeeded but local attention bookkeeping could not be persisted.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
       });
-      return {
-        ledger: store.getLedger(companyId),
-        snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
-      };
-    });
+    }
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -465,29 +485,38 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     const currentSnapshot = store.getSnapshot(companyId);
     const shouldIngest = snapshotContainsTask(currentSnapshot, taskId);
 
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      if (shouldIngest) {
-        const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
-        return { ledger, snapshot };
-      }
+    let snapshot = currentSnapshot ?? createEmptySnapshot(companyId);
+    try {
+      ({ snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
+        if (shouldIngest) {
+          const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
+          return { ledger, snapshot };
+        }
 
-      const overlayEntry: AttentionLedgerOverlayResponseEntry = {
-        kind: "overlay-response",
-        id: ledgerEntry.id,
-        occurredAt: ledgerEntry.occurredAt,
-        source: ledgerEntry.source,
-        apertureResponse: ledgerEntry.apertureResponse,
-        overlay: {
-          kind: "approval_overlay",
-          reason: "Approval frame came from the Paperclip approvals display adapter, not the replayed Core snapshot.",
-        },
-      };
-      const { ledger, snapshot } = store.applyOverlayResponse(companyId, overlayEntry);
-      return {
-        ledger,
-        snapshot,
-      };
-    });
+        const overlayEntry: AttentionLedgerOverlayResponseEntry = {
+          kind: "overlay-response",
+          id: ledgerEntry.id,
+          occurredAt: ledgerEntry.occurredAt,
+          source: ledgerEntry.source,
+          apertureResponse: ledgerEntry.apertureResponse,
+          overlay: {
+            kind: "approval_overlay",
+            reason: "Approval frame came from the Paperclip approvals display adapter, not the replayed Core snapshot.",
+          },
+        };
+        const { ledger, snapshot } = store.applyOverlayResponse(companyId, overlayEntry);
+        return {
+          ledger,
+          snapshot,
+        };
+      }));
+    } catch (error) {
+      ctx.logger.warn("Approval succeeded but local attention bookkeeping could not be persisted.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     let review: AttentionReviewState | null = null;
     try {
       ({ review } = await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {

@@ -331,6 +331,7 @@ describe("paperclip aperture", () => {
   it("maps approval events into attention state and clears them on acknowledgement", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [createApprovalRecord({ companyId: "company-1", id: "approval-1" })]);
 
     await harness.emit(
       "approval.created",
@@ -447,6 +448,7 @@ describe("paperclip aperture", () => {
   it("records operator engagement for the active now item", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [createApprovalRecord({ companyId: "company-focus-hold", id: "approval-1" })]);
 
     await harness.emit(
       "approval.created",
@@ -489,6 +491,7 @@ describe("paperclip aperture", () => {
   it("records viewed signals for the active now item through the worker action", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [createApprovalRecord({ companyId: "company-viewed-signal", id: "approval-1" })]);
 
     await harness.emit(
       "approval.created",
@@ -742,7 +745,10 @@ describe("paperclip aperture", () => {
   it("records approval responses through the plugin action path and clears the frame after restart", async () => {
     const firstHarness = createTestHarness({ manifest });
     await plugin.definition.setup(firstHarness.ctx);
-    mockApprovalApi(firstHarness);
+    mockApprovalApi(firstHarness, [createApprovalRecord({
+      companyId: "company-approval-response",
+      id: "approval-response-1",
+    })]);
 
     await firstHarness.emit(
       "approval.created",
@@ -800,7 +806,10 @@ describe("paperclip aperture", () => {
   it("persists approval suppression even when the approval frame only exists in the UI layer", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
-    mockApprovalApi(harness);
+    mockApprovalApi(harness, [createApprovalRecord({
+      companyId: "company-approval-ui-only",
+      id: "approval-ui-only-1",
+    })]);
 
     await performUserAction(harness, "record-approval-response", {
       companyId: "company-approval-ui-only",
@@ -848,6 +857,10 @@ describe("paperclip aperture", () => {
 
     const secondHarness = createTestHarness({ manifest });
     await plugin.definition.setup(secondHarness.ctx);
+    mockApprovalApi(secondHarness, [createApprovalRecord({
+      companyId: "company-replay",
+      id: "approval-replay-1",
+    })]);
     await secondHarness.ctx.state.set(
       { scopeKind: "company", scopeId: "company-replay", stateKey: ATTENTION_STATE_KEY },
       persistedState,
@@ -2022,6 +2035,71 @@ describe("paperclip aperture", () => {
     expect(user2After.review?.unread.total).toBe(1);
   });
 
+  it("rejects invented, stale, and cross-company approval targets before any mutation", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [
+      createApprovalRecord({ id: "approval-current", companyId: "company-live" }),
+      createApprovalRecord({ id: "approval-other-company", companyId: "company-other" }),
+    ]);
+
+    for (const approvalId of ["approval-invented", "approval-other-company"]) {
+      await expect(performUserAction(harness, "mark-attention-viewed", {
+        companyId: "company-live",
+        taskId: `approval:${approvalId}`,
+        interactionId: `approval:${approvalId}:approval`,
+      })).rejects.toThrow("not a current pending approval in the active company");
+    }
+
+    expect((await harness.getData<AttentionExport>("attention-export", { companyId: "company-live" })).signalEntries)
+      .toHaveLength(0);
+  });
+
+  it("returns comment success after the host write even when all local bookkeeping fails", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    harness.seed({
+      issues: [createIssue({ assigneeUserId: "user-1" })],
+      issueComments: [createIssueComment()],
+    });
+    const snapshot = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+    )).snapshot;
+    vi.spyOn(harness.ctx.state, "set").mockRejectedValue(new Error("local state unavailable"));
+
+    const result = await performUserAction<{ ok: boolean }>(harness, "comment-on-issue", {
+      companyId: "company-live",
+      taskId: snapshot.now?.taskId,
+      issueId: "issue-1",
+      body: "This host comment must not be retried.",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(await harness.ctx.issues.listComments("issue-1", "company-live")).toHaveLength(2);
+  });
+
+  it("returns approval success after the host write even when all local bookkeeping fails", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [createApprovalRecord({ id: "approval-durable", companyId: "company-live" })]);
+    vi.spyOn(harness.ctx.state, "set").mockRejectedValue(new Error("local state unavailable"));
+
+    const result = await performUserAction<{ ok: boolean }>(harness, "record-approval-response", {
+      companyId: "company-live",
+      taskId: "approval:approval-durable",
+      interactionId: "approval:approval-durable:approval",
+      decision: "approve",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(harness.ctx.http.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/approvals/approval-durable/approve"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("serializes concurrent viewer review updates without losing either write", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
@@ -2093,6 +2171,10 @@ describe("paperclip aperture", () => {
   it("exports the ledger, responses, and reconciled snapshot for offline analysis", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [createApprovalRecord({
+      companyId: "company-export",
+      id: "approval-export-1",
+    })]);
 
     await harness.emit(
       "approval.created",
@@ -2125,7 +2207,9 @@ describe("paperclip aperture", () => {
     expect(afterResponse.responseEntries).toHaveLength(1);
     expect(afterResponse.traces.length).toBeGreaterThanOrEqual(beforeResponse.traces.length);
     expect(afterResponse.snapshot.now).toBeNull();
-    expect(afterResponse.displaySnapshot.now).toBeNull();
+    // A generic Core acknowledgement cannot resolve the authoritative host
+    // approval. The personal overlay remains until approve/reject/revision.
+    expect(afterResponse.displaySnapshot.now?.taskId).toBe("approval:approval-export-1");
   });
 
   it("exposes recent core traces for debugging exports", async () => {
@@ -2550,6 +2634,10 @@ describe("paperclip aperture", () => {
   it("exports a lab-compatible replay scenario from the attention ledger", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
+    mockApprovalApi(harness, [createApprovalRecord({
+      companyId: "company-replay-export",
+      id: "approval-replay-export-1",
+    })]);
 
     await harness.emit(
       "approval.created",
