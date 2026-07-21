@@ -1,6 +1,7 @@
 import { readFocusMetadata } from "./contracts.js";
 import { attachReviewState, mergeStoredFrames, type FrameLane, type StoredFrameCandidate } from "./frame-model.js";
 import { createEmptySnapshot, type AttentionReviewState, type AttentionSnapshot, type StoredAttentionFrame } from "./types.js";
+import { taskKind } from "./task-ref.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -34,7 +35,11 @@ export function isOperatorActionFrame(frame: StoredAttentionFrame, viewerUserId:
   // Event-derived approval frames predate the host approval overlay and do not
   // carry host metadata. Their typed response contract is sufficient because
   // the corresponding approval resolution event removes the frame.
-  if (frame.responseSpec?.kind === "approval" && focus.approvalStatus === undefined) return true;
+  if (
+    taskKind(frame.taskId) === "approval"
+    && frame.responseSpec?.kind === "approval"
+    && focus.approvalStatus === undefined
+  ) return true;
 
   if (
     focus.entityType === "approval"

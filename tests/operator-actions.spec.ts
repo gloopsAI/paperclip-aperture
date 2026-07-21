@@ -103,6 +103,17 @@ describe("personal operator action projection", () => {
     expect(projectOperatorActionSnapshot(source, createEmptyReviewState(companyId), "user-1").counts.total).toBe(0);
   });
 
+  it("does not mistake a legacy run failure with approval-shaped buttons for a board approval", () => {
+    const source = {
+      ...createEmptySnapshot(companyId),
+      updatedAt: "2026-07-21T00:00:00.000Z",
+      now: frame("run:failed-run", {}, "approval"),
+      counts: { now: 1, next: 0, ambient: 0, total: 1 },
+    };
+
+    expect(projectOperatorActionSnapshot(source, createEmptyReviewState(companyId), "user-1").counts.total).toBe(0);
+  });
+
   it("isolates user-owned work and drops terminal recovery actions", () => {
     const source = {
       ...createEmptySnapshot(companyId),

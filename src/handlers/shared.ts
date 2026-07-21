@@ -107,6 +107,25 @@ export async function persistUserReviewState(
   );
 }
 
+/**
+ * Serialize the viewer-scoped review read/modify/write with the rest of the
+ * company's attention mutations. This prevents two tabs (or two rapid UI
+ * actions) from overwriting each other's seen/suppressed frame state.
+ */
+export async function runUserReviewMutation<T>(
+  ctx: PluginContext,
+  companyId: string,
+  userId: string,
+  mutation: (current: AttentionReviewState) => { review: AttentionReviewState; result: T } | Promise<{ review: AttentionReviewState; result: T }>,
+): Promise<{ review: AttentionReviewState; result: T }> {
+  return runCompanyMutation(companyId, async () => {
+    const current = await loadUserReviewState(ctx, companyId, userId);
+    const next = await mutation(current);
+    await persistUserReviewState(ctx, companyId, userId, next.review);
+    return next;
+  });
+}
+
 export function isInvocationScopeDenied(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("invocation scope") || message.includes("not allowed to perform");

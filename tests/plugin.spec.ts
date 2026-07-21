@@ -872,7 +872,7 @@ describe("paperclip aperture", () => {
     const firstHarness = createTestHarness({ manifest });
     await plugin.definition.setup(firstHarness.ctx);
     firstHarness.seed({
-      issues: [createIssue({ companyId: "company-review-replay" })],
+      issues: [createIssue({ companyId: "company-review-replay", assigneeUserId: "user-1" })],
       issueComments: [createIssueComment({ companyId: "company-review-replay" })],
     });
 
@@ -1692,7 +1692,7 @@ describe("paperclip aperture", () => {
     ]));
   });
 
-  it("restores the prior focus state and marks health when persistence fails", async () => {
+  it("does not suppress or mutate shared attention when viewer-state persistence fails", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
@@ -1705,7 +1705,7 @@ describe("paperclip aperture", () => {
 
     const originalSet = harness.ctx.state.set.bind(harness.ctx.state);
     vi.spyOn(harness.ctx.state, "set").mockImplementationOnce(async (descriptor, value) => {
-      if (descriptor.stateKey === ATTENTION_STATE_KEY) {
+      if (descriptor.stateKey === "attention-review:user:user-1") {
         throw new Error("state persistence unavailable");
       }
       return originalSet(descriptor, value);
@@ -1717,11 +1717,14 @@ describe("paperclip aperture", () => {
       interactionId: initial.now?.interactionId,
     })).rejects.toThrow("state persistence unavailable");
 
-    const restored = await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" });
+    const restored = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+    )).snapshot;
     expect(restored.now?.taskId).toBe("issue:issue-1");
-
-    const failedHealth = await harness.getData<{ faultedCompanies: number }>("health", {});
-    expect(failedHealth.faultedCompanies).toBe(1);
+    expect((await harness.getData<AttentionSnapshot>("attention-summary", { companyId: "company-live" })).now?.taskId)
+      .toBe("issue:issue-1");
 
     await performUserAction(harness, "acknowledge-frame", {
       companyId: "company-live",
@@ -1729,15 +1732,19 @@ describe("paperclip aperture", () => {
       interactionId: restored.now?.interactionId,
     });
 
-    const recoveredHealth = await harness.getData<{ faultedCompanies: number }>("health", {});
-    expect(recoveredHealth.faultedCompanies).toBe(0);
+    const acknowledged = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+    )).snapshot;
+    expect(acknowledged.counts.total).toBe(0);
   });
 
   it("posts issue comments back to Paperclip from the frame action", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment()],
     });
 
@@ -1782,7 +1789,7 @@ describe("paperclip aperture", () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment()],
     });
 
@@ -1808,7 +1815,7 @@ describe("paperclip aperture", () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
-      issues: [createIssue()],
+      issues: [createIssue({ assigneeUserId: "user-1" })],
       issueComments: [createIssueComment()],
     });
 
@@ -1964,6 +1971,92 @@ describe("paperclip aperture", () => {
     expect(user1After.counts.total).toBe(0);
     expect(user2After.now?.taskId).toBe("issue:issue-user-2");
     expect(user2After.counts.total).toBe(1);
+  });
+
+  it("rejects cross-user writes even when the caller knows another user's hidden frame ids", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    harness.seed({
+      issues: [
+        createIssue({ id: "issue-user-1", identifier: "CAM-11", assigneeUserId: "user-1" }),
+        createIssue({ id: "issue-user-2", identifier: "CAM-12", assigneeUserId: "user-2" }),
+      ],
+      issueComments: [
+        createIssueComment({ id: "comment-user-1", issueId: "issue-user-1" }),
+        createIssueComment({ id: "comment-user-2", issueId: "issue-user-2" }),
+      ],
+    });
+
+    const user2 = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-2",
+    )).snapshot;
+    const taskId = user2.now?.taskId ?? "";
+    const interactionId = user2.now?.interactionId ?? "";
+
+    await expect(performUserAction(harness, "acknowledge-frame", {
+      companyId: "company-live",
+      taskId,
+      interactionId,
+    }, "user-1")).rejects.toThrow("not assigned to the authenticated user or board");
+    await expect(performUserAction(harness, "mark-attention-seen", {
+      companyId: "company-live",
+      taskIds: [taskId],
+    }, "user-1")).rejects.toThrow("not assigned to the authenticated user or board");
+    await expect(performUserAction(harness, "comment-on-issue", {
+      companyId: "company-live",
+      taskId,
+      issueId: "issue-user-2",
+      body: "Cross-user write must be rejected.",
+    }, "user-1")).rejects.toThrow("not assigned to the authenticated user or board");
+
+    const user2After = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-2",
+    )).snapshot;
+    expect(user2After.now?.taskId).toBe(taskId);
+    expect(user2After.review?.unread.total).toBe(1);
+  });
+
+  it("serializes concurrent viewer review updates without losing either write", async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    harness.seed({
+      issues: [
+        createIssue({ id: "issue-concurrent-1", identifier: "CAM-21", assigneeUserId: "user-1" }),
+        createIssue({ id: "issue-concurrent-2", identifier: "CAM-22", assigneeUserId: "user-1" }),
+      ],
+      issueComments: [
+        createIssueComment({ id: "comment-concurrent-1", issueId: "issue-concurrent-1" }),
+        createIssueComment({ id: "comment-concurrent-2", issueId: "issue-concurrent-2" }),
+      ],
+    });
+
+    const initial = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-1",
+    )).snapshot;
+    const taskIds = [initial.now, ...initial.next].flatMap((frame) => frame ? [frame.taskId] : []);
+    expect(taskIds).toHaveLength(2);
+
+    await Promise.all(taskIds.map((taskId) => performUserAction(harness, "mark-attention-seen", {
+      companyId: "company-live",
+      taskIds: [taskId],
+    }, "user-1")));
+
+    const after = (await getPersonalData<{ snapshot: AttentionSnapshot }>(
+      harness,
+      "attention-display",
+      { companyId: "company-live" },
+      "user-1",
+    )).snapshot;
+    expect(after.review?.unread.total).toBe(0);
   });
 
   it("rejects personal Focus reads and actions without trusted authenticated context", async () => {

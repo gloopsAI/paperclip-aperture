@@ -1,4 +1,4 @@
-import type { PluginContext } from "@paperclipai/plugin-sdk";
+import type { Issue, PluginContext } from "@paperclipai/plugin-sdk";
 import type { AttentionSignal } from "@tomismeta/aperture-core";
 import type { ApertureCompanyStore } from "../aperture/core-store.js";
 import { readFocusMetadata } from "../aperture/contracts.js";
@@ -8,23 +8,55 @@ import { createEmptyReviewState, createEmptySnapshot, type AttentionLedgerOverla
 import { submitApprovalDecision } from "../host/paperclip-approvals.js";
 import {
   emitAttentionUpdate,
-  loadUserReviewState,
   logFocusActivity,
-  persistUserReviewState,
   requireAuthenticatedUser,
   requireCompanyId,
   requireStringParam,
   runAttentionMutation,
+  runUserReviewMutation,
   trackFocusTelemetry,
   type PluginRequestContext,
 } from "./shared.js";
 
-async function loadReviewState(
+function viewerOwnsIssueAction(issue: Issue, viewerUserId: string): boolean {
+  if (issue.assigneeUserId === viewerUserId) return true;
+
+  const blockedOwner = issue.blockedInboxAttention?.owner;
+  if (blockedOwner?.type === "board") return true;
+  if (blockedOwner?.type === "user" && blockedOwner.userId === viewerUserId) return true;
+
+  const recovery = issue.activeRecoveryAction;
+  if (recovery?.status !== "active" && recovery?.status !== "escalated") return false;
+  if (recovery.ownerType === "board") return true;
+  return recovery.ownerType === "user" && recovery.ownerUserId === viewerUserId;
+}
+
+function assertInteractionMatchesTask(taskId: string, interactionId: string): void {
+  if (!interactionId.startsWith(`${taskId}:`)) {
+    throw new Error("Focus interaction target does not match the selected frame.");
+  }
+}
+
+async function assertViewerCanActOnTask(
   ctx: PluginContext,
   companyId: string,
-  userId: string,
-): Promise<AttentionReviewState> {
-  return loadUserReviewState(ctx, companyId, userId);
+  viewerUserId: string,
+  taskId: string,
+  interactionId?: string,
+): Promise<void> {
+  if (interactionId) assertInteractionMatchesTask(taskId, interactionId);
+
+  const taskRef = parseTaskId(taskId);
+  if (!taskRef) throw new Error("Focus action requires a valid task target.");
+  if (taskRef.kind === "approval") return;
+  if (taskRef.kind !== "issue") {
+    throw new Error("Focus action target is not a current user or board action.");
+  }
+
+  const issue = await ctx.issues.get(taskRef.id, companyId);
+  if (!issue || !viewerOwnsIssueAction(issue, viewerUserId)) {
+    throw new Error("Focus action target is not assigned to the authenticated user or board.");
+  }
 }
 
 function buildSeenReviewState(
@@ -156,9 +188,10 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
 
   ctx.actions.register("mark-attention-viewed", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
-    requireAuthenticatedUser(context, companyId);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
     const surface = typeof params.surface === "string" && params.surface.trim().length > 0
       ? params.surface.trim()
       : "focus";
@@ -198,9 +231,10 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
 
   ctx.actions.register("engage-focus", async (params, context?: PluginRequestContext) => {
     const companyId = requireCompanyId(params);
-    requireAuthenticatedUser(context, companyId);
+    const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
     const durationMs = typeof params.durationMs === "number" && Number.isFinite(params.durationMs)
       ? Math.max(25, Math.floor(params.durationMs))
       : undefined;
@@ -280,25 +314,31 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     const viewerUserId = requireAuthenticatedUser(context, companyId);
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
-    const response = mapDecisionToResponse({ taskId, interactionId, action: "acknowledge" });
-    const ledgerEntry: AttentionLedgerResponseEntry = {
-      kind: "response",
-      id: `${taskId}:acknowledge:${Date.now()}`,
-      occurredAt: new Date().toISOString(),
-      source: {
-        eventType: "plugin.local.acknowledge",
-        entityId: taskId,
-      },
-      apertureResponse: response,
-    };
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
     const currentSnapshot = store.getSnapshot(companyId);
-    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
-    const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
-    const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
-      const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
-      return { ledger, snapshot };
-    });
-    await persistUserReviewState(ctx, companyId, viewerUserId, review);
+    let snapshot = currentSnapshot ?? createEmptySnapshot(companyId);
+    if (taskIdMatchesKind(taskId, "approval")) {
+      const response = mapDecisionToResponse({ taskId, interactionId, action: "acknowledge" });
+      const ledgerEntry: AttentionLedgerResponseEntry = {
+        kind: "response",
+        id: `${taskId}:acknowledge:${Date.now()}`,
+        occurredAt: new Date().toISOString(),
+        source: {
+          eventType: "plugin.local.acknowledge",
+          entityId: taskId,
+        },
+        apertureResponse: response,
+      };
+      ({ snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
+        const { ledger, snapshot } = store.applyResponse(companyId, ledgerEntry);
+        return { ledger, snapshot };
+      }));
+    } else {
+      await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+        const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
+        return { review, result: undefined };
+      });
+    }
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -326,11 +366,26 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     if (taskRef.id !== issueId) {
       throw new Error("Issue comment target does not match the selected frame.");
     }
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId);
 
     const comment = await ctx.issues.createComment(issueId, body, companyId);
     const currentSnapshot = store.getSnapshot(companyId);
-    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
-    const review = buildSeenReviewState(currentReview, companyId, [taskId], false);
+    let review: AttentionReviewState | null = null;
+    try {
+      ({ review } = await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+        const review = buildSeenReviewState(currentReview, companyId, [taskId], false);
+        return { review, result: undefined };
+      }));
+    } catch (error) {
+      // The host comment is the authoritative side effect and may already be
+      // durable. Do not report it as failed (and invite a duplicate retry)
+      // merely because the optional viewer-read marker could not be stored.
+      ctx.logger.warn("Issue comment succeeded but viewer review state could not be updated.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const { snapshot } = await runAttentionMutation(ctx, store, companyId, () => {
       store.invalidateHostCache(companyId, {
         keys: [
@@ -344,7 +399,6 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
         snapshot: store.getSnapshot(companyId) ?? createEmptySnapshot(companyId),
       };
     });
-    await persistUserReviewState(ctx, companyId, viewerUserId, review);
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -375,6 +429,7 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     const taskId = requireStringParam(params, "taskId");
     const interactionId = requireStringParam(params, "interactionId");
     const decision = requireStringParam(params, "decision");
+    await assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId, interactionId);
 
     if (!taskIdMatchesKind(taskId, "approval")) {
       throw new Error("Approval responses can only be recorded for approval-backed frames.");
@@ -407,8 +462,6 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     await submitApprovalDecision(ctx, approvalId, decision as "approve" | "reject" | "request-revision", config);
     store.invalidateApprovals(companyId);
 
-    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
-    const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
     const currentSnapshot = store.getSnapshot(companyId);
     const shouldIngest = snapshotContainsTask(currentSnapshot, taskId);
 
@@ -435,7 +488,22 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
         snapshot,
       };
     });
-    await persistUserReviewState(ctx, companyId, viewerUserId, review);
+    let review: AttentionReviewState | null = null;
+    try {
+      ({ review } = await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+        const review = buildSeenReviewState(currentReview, companyId, [taskId], true);
+        return { review, result: undefined };
+      }));
+    } catch (error) {
+      // The approval endpoint is authoritative and idempotent with respect to
+      // the resulting status. A viewer-marker failure must not turn a real
+      // approval into a misleading failed action.
+      ctx.logger.warn("Approval succeeded but viewer review state could not be updated.", {
+        companyId,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     emitAttentionUpdate(ctx, {
       companyId,
       reason: "action",
@@ -475,9 +543,11 @@ export function registerActionHandlers(ctx: PluginContext, store: ApertureCompan
     if (taskIds.length === 0) {
       throw new Error("taskIds must include at least one frame task id.");
     }
-    const currentReview = await loadReviewState(ctx, companyId, viewerUserId);
-    const review = buildSeenReviewState(currentReview, companyId, taskIds);
-    await persistUserReviewState(ctx, companyId, viewerUserId, review);
+    await Promise.all(taskIds.map((taskId) => assertViewerCanActOnTask(ctx, companyId, viewerUserId, taskId)));
+    const { review } = await runUserReviewMutation(ctx, companyId, viewerUserId, (currentReview) => {
+      const review = buildSeenReviewState(currentReview, companyId, taskIds);
+      return { review, result: undefined };
+    });
     const snapshot = store.getSnapshot(companyId) ?? createEmptySnapshot(companyId);
     emitAttentionUpdate(ctx, {
       companyId,
