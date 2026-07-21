@@ -26,6 +26,7 @@ import {
   type AttentionReviewState,
   type AttentionSnapshot,
 } from "../aperture/types.js";
+import { projectOperatorActionSnapshot } from "../aperture/operator-actions.js";
 import { ApertureCompanyStore } from "../aperture/core-store.js";
 import { listPendingApprovals } from "../host/paperclip-approvals.js";
 import {
@@ -352,7 +353,10 @@ async function loadDisplaySnapshot(
 
   return {
     reconciledSnapshot,
-    displaySnapshot: mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState),
+    displaySnapshot: projectOperatorActionSnapshot(
+      mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState),
+      reviewState,
+    ),
   };
 }
 
@@ -419,7 +423,10 @@ export function registerDataHandlers(ctx: PluginContext, store: ApertureCompanyS
       freshHostData: true,
     });
     const approvals = await loadWorkerApprovals(ctx, store, companyId);
-    const displaySnapshot = mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState);
+    const displaySnapshot = projectOperatorActionSnapshot(
+      mergeSnapshotWithApprovals(reconciledSnapshot, companyId, approvals, reviewState),
+      reviewState,
+    );
     const ledgerWindow = tailWindow(baseLedger, entryLimit);
     const traceWindow = tailWindow(store.getTraces(companyId), traceLimit);
 

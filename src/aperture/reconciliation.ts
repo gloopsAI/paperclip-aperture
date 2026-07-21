@@ -567,6 +567,8 @@ function issueFrame(
       },
       metadata: {
         entityType: "issue",
+        issueAssigneeAgentId: issue.assigneeAgentId,
+        issueAssigneeUserId: issue.assigneeUserId,
         issueStatus: issue.status,
         issuePriority: issue.priority,
         issueWorkMode: issue.workMode,

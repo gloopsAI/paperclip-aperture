@@ -1014,7 +1014,7 @@ describe("paperclip aperture", () => {
     expect(latest).not.toContain("Deleted comment");
   });
 
-  it("surfaces Paperclip issue blocker relations as first-class focus context", async () => {
+  it("preserves Paperclip issue blocker relations in the diagnostic attention snapshot", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     mockApprovalApi(harness, []);
@@ -1044,13 +1044,13 @@ describe("paperclip aperture", () => {
       ],
     });
 
-    const display = await harness.getData<{ snapshot: AttentionSnapshot }>("attention-display", {
+    const display = await harness.getData<AttentionSnapshot>("attention-summary", {
       companyId: "company-relations",
     });
     const frames = [
-      ...(display.snapshot.now ? [display.snapshot.now] : []),
-      ...display.snapshot.next,
-      ...display.snapshot.ambient,
+      ...(display.now ? [display.now] : []),
+      ...display.next,
+      ...display.ambient,
     ];
     const blockedFrame = frames.find((frame) => frame.taskId === "issue:issue-blocked");
 
@@ -2092,13 +2092,19 @@ describe("paperclip aperture", () => {
         lanePath: {
           core: null,
           reconciled: "now",
-          display: "now",
+          display: null,
         },
         changes: expect.arrayContaining([
           expect.objectContaining({
             stage: "reconciled",
             kind: "introduced",
             toLane: "now",
+          }),
+          expect.objectContaining({
+            stage: "display",
+            kind: "removed",
+            fromLane: "now",
+            toLane: null,
           }),
         ]),
       }),
@@ -2160,7 +2166,7 @@ describe("paperclip aperture", () => {
         lanePath: {
           core: "now",
           reconciled: "next",
-          display: "next",
+          display: null,
         },
         changes: expect.arrayContaining([
           expect.objectContaining({
@@ -2168,6 +2174,12 @@ describe("paperclip aperture", () => {
             kind: "moved",
             fromLane: "now",
             toLane: "next",
+          }),
+          expect.objectContaining({
+            stage: "display",
+            kind: "removed",
+            fromLane: "next",
+            toLane: null,
           }),
         ]),
       }),
@@ -2229,7 +2241,7 @@ describe("paperclip aperture", () => {
     expect(listDocuments.mock.calls.length).toBeGreaterThan(documentCallsAfterFirstRead);
   });
 
-  it("drops stale agent error focus when Paperclip clears the agent error", async () => {
+  it("drops stale agent error diagnostics when Paperclip clears the agent error", async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
     harness.seed({
@@ -2241,13 +2253,13 @@ describe("paperclip aperture", () => {
       ],
     });
 
-    const firstDisplay = await harness.getData<{ snapshot: AttentionSnapshot }>("attention-display", {
+    const firstDisplay = await harness.getData<AttentionSnapshot>("attention-summary", {
       companyId: "company-agent-clear",
     });
     const firstFrames = [
-      ...(firstDisplay.snapshot.now ? [firstDisplay.snapshot.now] : []),
-      ...firstDisplay.snapshot.next,
-      ...firstDisplay.snapshot.ambient,
+      ...(firstDisplay.now ? [firstDisplay.now] : []),
+      ...firstDisplay.next,
+      ...firstDisplay.ambient,
     ];
     expect(firstFrames.some((frame) => frame.taskId === "agent:agent-1")).toBe(true);
 
@@ -2266,13 +2278,13 @@ describe("paperclip aperture", () => {
       { companyId: "company-agent-clear", entityId: "agent-1", entityType: "agent" },
     );
 
-    const clearedDisplay = await harness.getData<{ snapshot: AttentionSnapshot }>("attention-display", {
+    const clearedDisplay = await harness.getData<AttentionSnapshot>("attention-summary", {
       companyId: "company-agent-clear",
     });
     const clearedFrames = [
-      ...(clearedDisplay.snapshot.now ? [clearedDisplay.snapshot.now] : []),
-      ...clearedDisplay.snapshot.next,
-      ...clearedDisplay.snapshot.ambient,
+      ...(clearedDisplay.now ? [clearedDisplay.now] : []),
+      ...clearedDisplay.next,
+      ...clearedDisplay.ambient,
     ];
     expect(clearedFrames.find((frame) => frame.taskId === "agent:agent-1")).toBeUndefined();
 
